@@ -32,7 +32,7 @@ MAX_ITERATIONS = 10
 EVAL_ITERATIONS = (2, 4, 6, 8, 10)
 MAX_TRAINING_ROLLOUTS = 80
 MAX_EVALUATION_ROLLOUTS = 20
-MAX_TOKENS = 2750
+MAX_TOKENS = 32000
 ROLLOUT_TIMEOUT_SECONDS = 35 * 60
 LEARNING_RATE = 1e-5
 LORA_RANK = 32
@@ -135,13 +135,7 @@ def experiment_contract() -> dict[str, Any]:
         "max_training_rollouts": MAX_TRAINING_ROLLOUTS,
         "max_evaluation_rollouts": MAX_EVALUATION_ROLLOUTS,
         "max_tokens_per_rollout": MAX_TOKENS,
-        "generation_cap_evidence": {
-            "valid_counts": [79, 265, 556, 1307],
-            "valid_min": 79,
-            "valid_median": 410.5,
-            "valid_max": 1307,
-            "policy": "2750 is just over 2x the valid maximum, rounded upward",
-        },
+        "generation_cap_authority": "explicit_user_correction_exactly_32000",
         "length_truncation_policy": "scored_model_outcome_no_sampling_retry",
         "rollout_timeout_seconds": ROLLOUT_TIMEOUT_SECONDS,
         "learning_rate": LEARNING_RATE,
