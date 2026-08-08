@@ -32,6 +32,7 @@ EFFORT = 0.7
 DEFAULT_SEEDS = [991001]
 WORLD_SEED = 411001
 SHARED_SNAPSHOT = "browser-rl-local-harness-f5eaf904-c2m4d4-v1"
+PROTOCOL_READER_LIMIT = 16 * 1024 * 1024
 TASK_INSTRUCTION = (
     "From this Zenith UK search results page, extract a list of smart lighting products, "
     "including the product title, price, and the name of the seller."
@@ -343,6 +344,39 @@ async def validate_loop(output: Path) -> None:
     await asyncio.gather(*(fake_rollout(ordinal) for ordinal in range(1, 5)))
     assert sorted(accounted) == [1, 2, 3, 4]
     assert peak_active == 2
+
+    oversized_result = exact_tool_result + ("\nexact oversized evidence ☃" * 8192)
+    framed = (json.dumps({
+        "type": "tool_result",
+        "turn": 4,
+        "call": 1,
+        "result": oversized_result,
+    }, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=PROTOCOL_READER_LIMIT,
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(framed)
+    await proc.stdin.drain()
+    proc.stdin.close()
+    round_tripped = await read_protocol_line(proc)
+    stderr = await proc.stderr.read() if proc.stderr is not None else b""
+    assert await proc.wait() == 0, stderr.decode(errors="replace")
+    assert round_tripped["result"] == oversized_result
+    oversized_validation = {
+        "framed_bytes": len(framed),
+        "framed_sha256": digest(framed),
+        "result_bytes": len(oversized_result.encode()),
+        "result_sha256": digest(oversized_result.encode()),
+        "round_trip_exact": True,
+        "reader_limit": PROTOCOL_READER_LIMIT,
+    }
     receipt = {
         "validated_at": utc_now(),
         "zero_provider_calls": True,
@@ -354,6 +388,7 @@ async def validate_loop(output: Path) -> None:
             "concurrency": 2,
             "peak_active": peak_active,
         },
+        "oversized_protocol_round_trip": oversized_validation,
     }
     atomic_json(output / "validation.json", receipt)
     print(json.dumps(receipt, indent=2))
@@ -403,6 +438,7 @@ async def run_rollout(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        limit=PROTOCOL_READER_LIMIT,
     )
     ready = await read_protocol_line(proc)
     if ready.get("type") != "ready":
