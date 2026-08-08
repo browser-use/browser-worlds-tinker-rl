@@ -1,4 +1,7 @@
-"""Generate and execute four concurrent Inkling Zenith Browser Harness rollouts."""
+"""Compatibility exports plus the grounded multi-turn Zenith agent entrypoint.
+
+Historical batch helpers remain importable, but direct execution uses the proper agent loop.
+"""
 
 from __future__ import annotations
 
@@ -228,4 +231,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from run_zenith_inkling_agent import main as multi_turn_main
+    asyncio.run(multi_turn_main())

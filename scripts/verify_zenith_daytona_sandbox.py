@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -31,6 +32,173 @@ def ok(result, stage: str) -> str:
     return text
 
 
+def emit_protocol(value: dict) -> None:
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def execute_harness_turn(sandbox, out: Path, label: str, code: str) -> str:
+    turns = out / "turns"
+    turns.mkdir(exist_ok=True)
+    (turns / f"{label}.program.py").write_text(code)
+    remote_program = f"/tmp/browser-harness-{label}.py"
+    sandbox.fs.upload_file(code.encode(), remote_program, timeout=30)
+    result = sandbox.process.exec(
+        "bash -lc 'BU_CDP_URL=http://127.0.0.1:9222 BH_REQUIRE_REMOTE=1 BH_RECORD=1 "
+        "BH_RUNTIME_DIR=/tmp/browser-harness-runtime "
+        "XDG_CONFIG_HOME=/tmp/browser-harness-config "
+        f"browser-harness <{remote_program}'",
+        timeout=300,
+    )
+    stdout = str(result.result or "")
+    exit_code = int(result.exit_code)
+    collector = (
+        "import json\n"
+        "info=page_info()\n"
+        f"capture_screenshot('/tmp/outputs/{label}.png')\n"
+        "print('PAGE_INFO_JSON='+json.dumps(info,ensure_ascii=False))\n"
+    )
+    remote_collector = f"/tmp/browser-harness-{label}-collector.py"
+    sandbox.fs.upload_file(collector.encode(), remote_collector, timeout=30)
+    collector_result = sandbox.process.exec(
+        "bash -lc 'BU_CDP_URL=http://127.0.0.1:9222 BH_REQUIRE_REMOTE=1 BH_RECORD=1 "
+        "BH_RUNTIME_DIR=/tmp/browser-harness-runtime "
+        "XDG_CONFIG_HOME=/tmp/browser-harness-config "
+        f"browser-harness <{remote_collector}'",
+        timeout=300,
+    )
+    collector_stdout = str(collector_result.result or "")
+    page = None
+    for line in collector_stdout.splitlines():
+        if line.startswith("PAGE_INFO_JSON="):
+            page = json.loads(line.removeprefix("PAGE_INFO_JSON="))
+    payload = json.dumps(
+        {
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "error": stdout[-4000:] if exit_code else None,
+            "evidence_exit_code": int(collector_result.exit_code),
+            "evidence_stdout": collector_stdout,
+            "page_info": page,
+            "screenshot": f"/tmp/outputs/{label}.png",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    (turns / f"{label}.result.json").write_text(payload + "\n")
+    return payload
+
+
+def run_interactive_episode(
+    sandbox,
+    out: Path,
+    entry: str,
+    runtime: dict,
+    runtime_identity: dict,
+    materialized: str,
+    started: float,
+) -> None:
+    initial_observation = execute_harness_turn(
+        sandbox,
+        out,
+        "initial",
+        f"new_tab({entry!r})\nwait_for_load()\n",
+    )
+    initial_value = json.loads(initial_observation)
+    if initial_value["exit_code"] or initial_value["evidence_exit_code"]:
+        raise RuntimeError(f"initial browser grounding failed: {initial_observation}")
+    emit_protocol({
+        "type": "ready",
+        "entry_url": entry,
+        "observation": initial_observation,
+        "sandbox_id": str(sandbox.id),
+    })
+    final_response = ""
+    termination_reason = "irrecoverable_protocol_eof"
+    rollout_usage = None
+    model_tool_calls = 0
+    while line := sys.stdin.readline():
+        request = json.loads(line)
+        request_type = request.get("type")
+        if request_type == "tool":
+            turn = int(request["turn"])
+            call = int(request["call"])
+            result_text = execute_harness_turn(
+                sandbox,
+                out,
+                f"turn-{turn:04d}-call-{call:02d}",
+                str(request["code"]),
+            )
+            model_tool_calls += 1
+            emit_protocol({
+                "type": "tool_result",
+                "turn": turn,
+                "call": call,
+                "result": result_text,
+            })
+        elif request_type == "finish":
+            final_response = str(request.get("final_response") or "")
+            termination_reason = str(request.get("termination_reason") or "")
+            rollout_usage = request.get("usage")
+            break
+        else:
+            raise RuntimeError(f"unknown interactive request: {request_type!r}")
+    (out / "agent-final.txt").write_text(final_response)
+    ok(sandbox.process.exec(
+        "bash -lc 'tar -C /tmp -czf /tmp/outputs/browser-harness-runtime.tgz "
+        "browser-harness-runtime'",
+        timeout=60,
+    ), "trajectory archive")
+    sandbox.fs.upload_file(
+        (final_response.strip() + "\n").encode(),
+        "/tmp/customer-world/run/final_output.txt",
+        timeout=30,
+    )
+    ok(sandbox.process.exec(
+        "/tmp/customer-world/runtime/world-server finalize-episode", timeout=180
+    ), "finalize")
+    report = json.loads(ok(sandbox.process.exec(
+        "cat /tmp/customer-world/evidence/verification-report.json", timeout=30
+    ), "verifier report"))
+    output_names = ok(sandbox.process.exec(
+        "find /tmp/outputs -type f -printf '%P\\n' | sort", timeout=30
+    ), "output enumeration").splitlines()
+    outputs = []
+    for name in output_names:
+        if not name or name.startswith("/") or ".." in Path(name).parts:
+            raise RuntimeError(f"unsafe output path: {name!r}")
+        local = out / name
+        local.parent.mkdir(parents=True, exist_ok=True)
+        sandbox.fs.download_file(f"/tmp/outputs/{name}", str(local))
+        payload = local.read_bytes()
+        outputs.append({"path": name, "size": len(payload), "sha256": digest(payload)})
+    (out / "verification-report.json").write_text(json.dumps(report, indent=2) + "\n")
+    (out / "result.json").write_text(json.dumps({
+        "complete": True,
+        "architecture": "one_daytona_sandbox_multi_turn",
+        "browser_use_cloud": False,
+        "sandbox_id": str(sandbox.id),
+        "world": {
+            "site": "zenith",
+            "task_id": "zslr01",
+            "episode_id": runtime["episode_id"],
+            "entry_url": entry,
+        },
+        "runtime_artifact": runtime_identity,
+        "materialization": materialized,
+        "interactive": True,
+        "final_response": final_response,
+        "termination_reason": termination_reason,
+        "rollout_usage": rollout_usage,
+        "model_tool_calls": model_tool_calls,
+        "outputs": outputs,
+        "agent_final_present": bool(final_response.strip()),
+        "deterministic_reward": float(report.get("score", int(bool(report.get("passed"))))),
+        "deterministic_passed": bool(report.get("passed")),
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+    }, indent=2) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--world-binary", type=Path)
@@ -39,6 +207,7 @@ def main() -> None:
     parser.add_argument("--program", type=Path)
     parser.add_argument("--rollout-id", default="smoke")
     parser.add_argument("--seed", default="411001")
+    parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
     if os.environ.get("BROWSER_USE_API_KEY") or os.environ.get("BROWSER_USE_CLOUD_API_KEY"):
         raise RuntimeError("Browser Use Cloud credentials must be absent")
@@ -175,6 +344,18 @@ def main() -> None:
             "for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:9222/json/version >/tmp/cdp.json && exit 0; sleep 1; done; exit 1'",
             timeout=90,
         ), "chromium launch")
+
+        if args.interactive:
+            run_interactive_episode(
+                sandbox,
+                out,
+                entry,
+                runtime,
+                runtime_identity,
+                materialized,
+                started,
+            )
+            return
 
         reference_program = """import json
 new_tab(ENTRY)
