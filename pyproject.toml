@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
+  "daytona==0.192.0",
   "tinker-cookbook[modal] @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@2a7427c24a433b7dba8309c246bf5ce4f2420837",
 ]
 

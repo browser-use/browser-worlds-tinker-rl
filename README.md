@@ -61,3 +61,19 @@ uv run python -m tinker_cookbook.recipes.harbor_rl.scripts.train_terminal_bench 
 
 The learning rate is an explicit initial experiment value; Inkling does not publish a universal
 recommended RL learning rate.
+
+## Zenith sandbox
+
+The browser stack uses one reusable Daytona base snapshot containing Chromium and Browser Harness.
+Each rollout creates one ephemeral sandbox, materializes the exact Zenith World binary, and runs
+the World, Chromium, and Browser Harness locally together. Browser Use Cloud is not involved.
+
+```bash
+uv run python scripts/verify_zenith_daytona_sandbox.py \
+  --world-binary /tmp/zenith-world-server \
+  --customer-repo ~/work/browser-rl-daytona-harbor \
+  --output /tmp/zenith-daytona-browser-harness
+```
+
+The verifier checks the Zenith task result, records output-file and screenshot hashes, deletes the
+sandbox, and retains the shared snapshot for later rollouts.
