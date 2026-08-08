@@ -24,6 +24,8 @@ SUPPORTED_MODEL_RENDERERS = {
     "Qwen/Qwen3.6-27B": "qwen3_5_disable_thinking",
     "Qwen/Qwen3.6-35B-A3B": "qwen3_5",
 }
+QWEN27_MODEL = "Qwen/Qwen3.6-27B"
+THINKING_CHOICES = ("model-default", "enabled", "disabled")
 TASK = "zenith-zslr01"
 DEFAULT_RUNS = 1
 DEFAULT_CONCURRENCY = 1
@@ -115,8 +117,12 @@ SampleTurn = Callable[[list[Message], int, int], Awaitable[SampledTurn]]
 ExecuteTool = Callable[[str, int, int], Awaitable[str]]
 
 
-def renderer_for_model(model: str) -> tuple[str, Any]:
+def renderer_for_model(model: str, thinking: str = "model-default") -> tuple[str, Any]:
     renderer_name = SUPPORTED_MODEL_RENDERERS[model]
+    if model == QWEN27_MODEL and thinking != "model-default":
+        renderer_name = "qwen3_5" if thinking == "enabled" else "qwen3_5_disable_thinking"
+    elif thinking != "model-default":
+        raise ValueError(f"--thinking {thinking} is only supported for {QWEN27_MODEL}")
     tokenizer = get_tokenizer(model)
     if renderer_name == "TmlV0Renderer":
         return renderer_name, TmlV0Renderer(tokenizer)
@@ -267,8 +273,14 @@ async def validate_loop(output: Path) -> None:
         '"title":"Zenith"},"screenshot":"/tmp/outputs/turn.png"}'
     )
     model_results = []
-    for model, expected_renderer in SUPPORTED_MODEL_RENDERERS.items():
-        renderer_name, renderer = renderer_for_model(model)
+    renderer_selections = [
+        ("thinkingmachines/Inkling", "model-default", "TmlV0Renderer"),
+        (QWEN27_MODEL, "disabled", "qwen3_5_disable_thinking"),
+        (QWEN27_MODEL, "enabled", "qwen3_5"),
+        ("Qwen/Qwen3.6-35B-A3B", "model-default", "qwen3_5"),
+    ]
+    for model, thinking, expected_renderer in renderer_selections:
+        renderer_name, renderer = renderer_for_model(model, thinking)
         assert renderer_name == expected_renderer
         observed_remaining = []
         executed = []
@@ -320,6 +332,7 @@ async def validate_loop(output: Path) -> None:
         assert result["messages"][-2]["content"] == exact_tool_result
         model_results.append({
             "model": model,
+            "thinking": thinking,
             "renderer": renderer_name,
             "result": result,
         })
@@ -544,6 +557,7 @@ async def run_rollout(
         "artifact_root": str(rollout_root),
         "completed_at": utc_now(),
         "model": args.model,
+        "thinking": args.thinking,
         "renderer": renderer_name,
         "sampling_seed": sampling_seed,
         "world_seed": WORLD_SEED,
@@ -590,12 +604,13 @@ async def run_live(args: argparse.Namespace) -> None:
     instruction = (customer / "tasks/zenith-zslr01/instruction.md").read_text().strip()
     if instruction != TASK_INSTRUCTION:
         raise RuntimeError("Zenith task instruction changed")
-    renderer_name, renderer = renderer_for_model(args.model)
+    renderer_name, renderer = renderer_for_model(args.model, args.thinking)
     service = tinker.ServiceClient(user_metadata={"recipe": "zenith_multi_turn_agent"})
     client = await service.create_sampling_client_async(base_model=args.model)
     atomic_json(root / "contract.json", {
         "started_at": utc_now(),
         "model": args.model,
+        "thinking": args.thinking,
         "renderer": renderer_name,
         "task": TASK,
         "rollouts": args.runs,
@@ -636,6 +651,7 @@ async def run_live(args: argparse.Namespace) -> None:
                     "ordinal": ordinal,
                     "artifact_root": str(rollout_root),
                     "model": args.model,
+                    "thinking": args.thinking,
                     "renderer": renderer_name,
                     "sampling_seed": seed,
                     "world_seed": WORLD_SEED,
@@ -675,6 +691,7 @@ async def run_live(args: argparse.Namespace) -> None:
         "artifact_root": str(root),
         "completed_at": utc_now(),
         "model": args.model,
+        "thinking": args.thinking,
         "renderer": renderer_name,
         "task": TASK,
         "requested": args.runs,
@@ -716,6 +733,7 @@ async def main() -> None:
     parser.add_argument(
         "--model", choices=tuple(SUPPORTED_MODEL_RENDERERS), default=DEFAULT_MODEL
     )
+    parser.add_argument("--thinking", choices=THINKING_CHOICES, default="model-default")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_GENERATED_TOKENS)
