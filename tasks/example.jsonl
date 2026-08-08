@@ -1,3 +1,0 @@
-{"task_id":"commerce-example-train","split":"train","instruction":"Find the requested item and add the correct variant to the cart.","start_url":"https://synthetic-commerce.invalid","grader":"world-v1"}
-{"task_id":"commerce-example-held-out","split":"held_out","instruction":"Compare two requested variants and report the cheaper eligible option.","start_url":"https://synthetic-commerce.invalid","grader":"world-v1"}
-

@@ -1,48 +1,63 @@
 # Browser Worlds × Tinker RL
 
-A focused, reproducible demonstration of improving a small open-source browser agent with
-reinforcement learning on deterministic Browser Use Worlds.
+This repository will demonstrate specialist browser-agent improvement with reinforcement
+learning on deterministic Browser Use Worlds. Before changing the environment, it reproduces
+Tinker Cookbook's default Harbor RL recipe on Terminal-Bench using Inkling.
 
-The first experiment targets a narrow synthetic-commerce domain. We will publish held-out
-before/after scores, traces, and short browser recordings. The model improvement is the demo;
-the core result is that high-quality Worlds, tasks, and rewards make browser-agent RL practical.
+No browser-agent training code is present yet.
 
-## Architecture
+## Pinned baseline
 
-This project preserves Tinker Cookbook's Harbor RL training loop and tool-calling agent. It
-changes only the domain boundary:
+Tinker Cookbook is pinned in `pyproject.toml`; see [UPSTREAM.md](UPSTREAM.md). The baseline uses:
 
-- the Harbor-shaped bash tool runs `browser-harness` against a leased Browser Use Cloud browser;
-- a task supplies an instruction, starting URL, and deterministic World grader;
-- one sandbox and one browser lease are created and cleaned up per rollout;
-- the upstream group-relative training loop consumes the resulting scalar reward.
+- the upstream Harbor task loader and bash-tool agent;
+- Terminal-Bench 2.0;
+- Modal sandboxes;
+- each task's `tests/test.sh` reward;
+- `thinkingmachines/Inkling` instead of the recipe's original model default.
 
-Upstream is pinned in `pyproject.toml`; see [UPSTREAM.md](UPSTREAM.md) for provenance.
+## Setup
 
-## Status
-
-The Harbor-derived agent scaffold, typed task format, browser-aware bash tool, lifecycle
-interfaces, and training configuration are initialized. Live browser provisioning and the first
-World reward adapter are the next implementation step.
-
-## Quick start
+Place `TINKER_API_KEY` in `.env` and authenticate Modal. Then:
 
 ```bash
-uv sync --extra dev
-uv run browser-rl validate tasks/example.jsonl
-uv run pytest
+uv sync
+uvx harbor datasets download terminal-bench@2.0 \
+  -o ~/.cache/harbor/tasks/terminal-bench-2.0
 ```
 
-Training credentials belong in a local `.env` and must never be committed. A live run will be
-added only after the browser lease and grader adapters are connected.
+Load `.env` without passing credentials as command arguments:
 
-## Layout
-
-```text
-configs/                 Experiment configuration
-src/browser_rl/          Agent, environment, grader, task, and training code
-tasks/                   Train/held-out task manifests
-scripts/                 Small operational entry points
-tests/                   Focused contract tests
+```bash
+set -a
+source .env
+set +a
 ```
 
+## One-step baseline
+
+Run the smallest real training step first:
+
+```bash
+uv run python scripts/train_terminal_bench_smoke.py
+```
+
+This runs one Terminal-Bench task with two Inkling rollouts and disables the upstream iteration-zero
+evaluation over all 89 tasks. The Harbor agent, sandbox, grader, and training loop are unchanged.
+
+Validated on August 8, 2026: one batch and two rollouts completed, the optimizer step succeeded,
+and final Tinker state and sampler checkpoints were produced. Both rollouts reached their token
+limit and received `-0.1`, so this validates the baseline pipeline rather than task performance.
+
+## Full upstream example
+
+After the one-step run succeeds:
+
+```bash
+uv run python -m tinker_cookbook.recipes.harbor_rl.scripts.train_terminal_bench \
+  model_name=thinkingmachines/Inkling \
+  learning_rate=1e-5
+```
+
+The learning rate is an explicit initial experiment value; Inkling does not publish a universal
+recommended RL learning rate.
