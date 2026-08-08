@@ -11,12 +11,9 @@ from pathlib import Path
 
 from daytona import (
     CreateSandboxFromSnapshotParams,
-    CreateSnapshotParams,
     Daytona,
     DaytonaConfig,
     DaytonaNotFoundError,
-    Image,
-    Resources,
 )
 
 SNAPSHOT = "browser-rl-local-harness-f5eaf904-c2m4d4-v1"
@@ -63,19 +60,9 @@ def main() -> None:
     try:
         try:
             snapshot = daytona.snapshot.get(SNAPSHOT)
-            created = False
-        except DaytonaNotFoundError:
-            snapshot = daytona.snapshot.create(
-                CreateSnapshotParams(
-                    name=SNAPSHOT,
-                    image=Image.from_dockerfile(
-                        Path(__file__).parents[1] / "snapshots/daytona-browser-harness/Dockerfile"
-                    ),
-                    resources=Resources(cpu=2, memory=4, disk=4),
-                ),
-                timeout=0,
-            )
-            created = True
+        except DaytonaNotFoundError as exc:
+            raise RuntimeError(f"retained shared snapshot is missing: {SNAPSHOT}") from exc
+        created = False
         state = str(getattr(snapshot.state, "value", snapshot.state)).lower()
         if state != "active":
             raise RuntimeError(f"snapshot not active: {state}")
