@@ -346,6 +346,7 @@ async def execute_candidate(
     args: argparse.Namespace,
     root: Path,
     barrier: asyncio.Event,
+    start_attempt: int = 1,
 ) -> dict[str, Any]:
     await barrier.wait()
     rollout = root / f"rollout-{candidate.ordinal:02d}"
@@ -354,7 +355,7 @@ async def execute_candidate(
         candidate.program.write_text("# Preserve invalid or truncated model output as a scored outcome.\npass\n")
         candidate.program.chmod(0o600)
     attempts = []
-    for attempt in range(1, MAX_INFRA_RERUNS + 2):
+    for attempt in range(start_attempt, start_attempt + MAX_INFRA_RERUNS + 1):
         receipt = await evaluator_attempt(candidate, args, rollout, attempt)
         attempts.append(receipt)
         if receipt["infrastructure_valid"]:
@@ -512,31 +513,139 @@ def artifact_hashes(root: Path) -> list[dict[str, Any]]:
     return records
 
 
+
+def load_candidates(root: Path, renderer: TmlV0Renderer) -> list[Candidate]:
+    messages = renderer.create_conversation_prefix_with_tools(
+        tools=[BROWSER_TOOL], system_prompt=SYSTEM_PROMPT
+    ) + [Message(role="user", content=PROMPT)]
+    prompt = renderer.build_generation_prompt(messages, effort=0.7)
+    candidates = []
+    for ordinal in range(1, TRAIN_ROLLOUTS + 1):
+        rollout = root / f"iteration-01/training/rollout-{ordinal:02d}"
+        generation = json.loads((rollout / "generation.json").read_text())
+        program_path = rollout / "inkling-program.py"
+        candidates.append(Candidate(
+            ordinal=ordinal,
+            split="train",
+            iteration=1,
+            prompt=prompt,
+            tokens=[int(value) for value in generation["completion_tokens"]],
+            logprobs=[float(value) for value in generation["completion_logprobs"]],
+            program=program_path if program_path.is_file() else None,
+            model_valid=bool(generation["model_valid"]),
+            model_error=generation.get("model_error"),
+        ))
+    return candidates
+
 async def run(args: argparse.Namespace, validation: dict[str, Any]) -> Path:
     for key in ("TINKER_API_KEY", "DAYTONA_KEY"):
         if not os.environ.get(key, "").strip():
             raise RuntimeError(f"{key} is required")
-    run_id = f"zenith-overfit-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
-    root = (args.output_parent.resolve() / run_id)
-    root.mkdir(parents=True, exist_ok=False)
-    atomic_json(root / "validation.json", validation)
-    atomic_json(root / "contract.json", experiment_contract())
     renderer = TmlV0Renderer(get_tokenizer(MODEL))
     tokenizer = get_tokenizer(MODEL)
     service = tinker.ServiceClient(user_metadata={"recipe": "zenith_single_task_overfit"})
-    training_client = await service.create_lora_training_client_async(
-        base_model=MODEL, rank=LORA_RANK, seed=880808
-    )
-    sampling_client, initial_checkpoint = await checkpoint(training_client, root, run_id, 0)
-    training_summaries = []
     evaluation_summaries = []
-    checkpoints = [initial_checkpoint]
-    training_rollouts = 0
     evaluation_rollouts = 0
     consecutive_successes = 0
     stop_reason = "maximum_iterations"
-    optim_steps = 0
-    for iteration in range(1, MAX_ITERATIONS + 1):
+    if args.resume_run:
+        root = args.resume_run.resolve()
+        run_id = root.name
+        initial_checkpoint = json.loads((root / "checkpoint.json").read_text())
+        training_client = await service.create_training_client_from_state_with_optimizer_async(
+            initial_checkpoint["state_path"], base_model=MODEL
+        )
+        old_summary_path = root / "iteration-01/training/summary.json"
+        old_summary = json.loads(old_summary_path.read_text())
+        atomic_json(
+            root / "iteration-01/training/summary-before-evaluator-recovery.json",
+            old_summary,
+        )
+        old_report_path = root / "report.json"
+        if old_report_path.is_file():
+            atomic_json(root / "report-before-evaluator-recovery.json", json.loads(old_report_path.read_text()))
+        candidates = load_candidates(root, renderer)
+        old_by_ordinal = {record["ordinal"]: record for record in old_summary["records"]}
+        replay_candidates = [
+            candidate for candidate in candidates
+            if not old_by_ordinal[candidate.ordinal]["infrastructure_valid"]
+        ]
+        replay_barrier = asyncio.Event()
+        replay_tasks = [
+            asyncio.create_task(execute_candidate(
+                candidate,
+                args,
+                root / "iteration-01/training",
+                replay_barrier,
+                start_attempt=3,
+            ))
+            for candidate in replay_candidates
+        ]
+        atomic_json(root / "iteration-01/training/recovery-barrier.json", {
+            "released_at": utc_now(),
+            "rollouts": len(replay_candidates),
+            "concurrency": len(replay_candidates),
+            "reason": "score_agent_program_errors_without_resampling",
+        })
+        replay_barrier.set()
+        replay_records = await asyncio.gather(*replay_tasks)
+        replay_by_ordinal = {record["ordinal"]: record for record in replay_records}
+        records = [
+            old_by_ordinal[ordinal]
+            if old_by_ordinal[ordinal]["infrastructure_valid"]
+            else replay_by_ordinal[ordinal]
+            for ordinal in range(1, TRAIN_ROLLOUTS + 1)
+        ]
+        train_summary = batch_summary("train", 1, records)
+        train_summary["recovered_without_new_sampling"] = len(replay_candidates)
+        atomic_json(old_summary_path, train_summary)
+        if train_summary["infrastructure_valid"] != TRAIN_ROLLOUTS:
+            raise RuntimeError("iteration 1 evaluator recovery left invalid infrastructure")
+        datums = training_datums(candidates, train_summary["rewards"])
+        fwd_future = await training_client.forward_backward_async(
+            datums, loss_fn="importance_sampling"
+        )
+        optim_future = await training_client.optim_step_async(
+            tinker.AdamParams(
+                learning_rate=LEARNING_RATE, beta1=0.9, beta2=0.95, eps=1e-8
+            )
+        )
+        fwd = await fwd_future.result_async()
+        optim = await optim_future.result_async()
+        atomic_json(root / "iteration-01/optimizer.json", {
+            "iteration": 1,
+            "datums": len(datums),
+            "optimizer_steps": 1,
+            "loss_fn": "importance_sampling",
+            "learning_rate": LEARNING_RATE,
+            "forward_backward_outputs": len(fwd.loss_fn_outputs),
+            "optimizer_metrics": optim.metrics,
+            "evaluator_recovery": True,
+        })
+        sampling_client, checkpoint_receipt = await checkpoint(
+            training_client, root / "iteration-01", run_id, 1
+        )
+        training_summaries = [train_summary]
+        checkpoints = [initial_checkpoint, checkpoint_receipt]
+        training_rollouts = TRAIN_ROLLOUTS
+        optim_steps = 1
+        start_iteration = 2
+    else:
+        run_id = f"zenith-overfit-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        root = args.output_parent.resolve() / run_id
+        root.mkdir(parents=True, exist_ok=False)
+        atomic_json(root / "validation.json", validation)
+        atomic_json(root / "contract.json", experiment_contract())
+        training_client = await service.create_lora_training_client_async(
+            base_model=MODEL, rank=LORA_RANK, seed=880808
+        )
+        sampling_client, initial_checkpoint = await checkpoint(training_client, root, run_id, 0)
+        training_summaries = []
+        checkpoints = [initial_checkpoint]
+        training_rollouts = 0
+        optim_steps = 0
+        start_iteration = 1
+    for iteration in range(start_iteration, MAX_ITERATIONS + 1):
         candidates, train_summary = await run_batch(
             sampling_client,
             renderer,
@@ -652,6 +761,7 @@ async def main() -> None:
     parser.add_argument("--world-binary", type=Path, required=True)
     parser.add_argument("--customer-repo", type=Path, required=True)
     parser.add_argument("--output-parent", type=Path, default=Path("/tmp"))
+    parser.add_argument("--resume-run", type=Path)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--allow-local-commit", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()

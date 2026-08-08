@@ -207,13 +207,30 @@ print(answer)
             program = reference_program
         (out / "agent-program.py").write_text(program)
         sandbox.fs.upload_file(program.encode(), "/tmp/browser-harness-task.py", timeout=30)
-        harness_stdout = ok(sandbox.process.exec(
+        harness_result = sandbox.process.exec(
             "bash -lc 'BU_CDP_URL=http://127.0.0.1:9222 BH_REQUIRE_REMOTE=1 BH_RECORD=1 "
             "BH_RUNTIME_DIR=/tmp/browser-harness-runtime XDG_CONFIG_HOME=/tmp/browser-harness-config "
             "browser-harness </tmp/browser-harness-task.py'",
             timeout=300,
-        ), "browser harness")
+        )
+        harness_stdout = str(harness_result.result or "")
+        harness_exit_code = int(harness_result.exit_code)
         (out / "browser-harness.stdout.txt").write_text(harness_stdout)
+        if harness_exit_code:
+            collector = (
+                "import json\n"
+                "capture_screenshot('/tmp/outputs/final.png')\n"
+                "open('/tmp/outputs/page-info.txt','w').write(json.dumps(page_info(),ensure_ascii=False))\n"
+            )
+            sandbox.fs.upload_file(collector.encode(), "/tmp/browser-harness-collector.py", timeout=30)
+            collector_stdout = ok(sandbox.process.exec(
+                "bash -lc 'BU_CDP_URL=http://127.0.0.1:9222 BH_REQUIRE_REMOTE=1 BH_RECORD=1 "
+                "BH_RUNTIME_DIR=/tmp/browser-harness-collector-runtime "
+                "XDG_CONFIG_HOME=/tmp/browser-harness-collector-config "
+                "browser-harness </tmp/browser-harness-collector.py'",
+                timeout=300,
+            ), "browser harness evidence collector")
+            (out / "browser-harness-collector.stdout.txt").write_text(collector_stdout)
         ok(sandbox.process.exec(
             "bash -lc 'tar -C /tmp -czf /tmp/outputs/browser-harness-runtime.tgz browser-harness-runtime'",
             timeout=60,
@@ -256,6 +273,8 @@ print(answer)
             "runtime_artifact": runtime_identity,
             "materialization": materialized,
             "browser_harness_stdout": harness_stdout[-8000:],
+            "agent_program_exit_code": harness_exit_code,
+            "agent_program_error": harness_stdout[-4000:] if harness_exit_code else None,
             "outputs": outputs,
             "agent_final_present": agent_final_present,
             "deterministic_reward": float(report.get("score", int(bool(report.get("passed"))))),
