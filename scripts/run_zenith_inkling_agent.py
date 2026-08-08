@@ -14,15 +14,24 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import tinker
-from tinker_cookbook.renderers import Message, ToolCall, get_text_content
+from tinker_cookbook.renderers import Message, ToolCall, get_renderer, get_text_content
 from tinker_cookbook.renderers.tml_v0 import TmlV0Renderer
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-MODEL = "thinkingmachines/Inkling"
+DEFAULT_MODEL = "thinkingmachines/Inkling"
+SUPPORTED_MODEL_RENDERERS = {
+    "thinkingmachines/Inkling": "TmlV0Renderer",
+    "Qwen/Qwen3.6-27B": "qwen3_5_disable_thinking",
+    "Qwen/Qwen3.6-35B-A3B": "qwen3_5",
+}
 TASK = "zenith-zslr01"
-MAX_GENERATED_TOKENS = 32000
+DEFAULT_RUNS = 1
+DEFAULT_CONCURRENCY = 1
+DEFAULT_MAX_GENERATED_TOKENS = 32000
 EFFORT = 0.7
-SEED = 992001
+DEFAULT_SEEDS = [991001]
+WORLD_SEED = 411001
+SHARED_SNAPSHOT = "browser-rl-local-harness-f5eaf904-c2m4d4-v1"
 TASK_INSTRUCTION = (
     "From this Zenith UK search results page, extract a list of smart lighting products, "
     "including the product title, price, and the name of the seller."
@@ -105,10 +114,25 @@ SampleTurn = Callable[[list[Message], int, int], Awaitable[SampledTurn]]
 ExecuteTool = Callable[[str, int, int], Awaitable[str]]
 
 
+def renderer_for_model(model: str) -> tuple[str, Any]:
+    renderer_name = SUPPORTED_MODEL_RENDERERS[model]
+    tokenizer = get_tokenizer(model)
+    if renderer_name == "TmlV0Renderer":
+        return renderer_name, TmlV0Renderer(tokenizer)
+    return renderer_name, get_renderer(renderer_name, tokenizer)
+
+
+def build_generation_prompt(renderer: Any, messages: list[Message], model: str):
+    if model == "thinkingmachines/Inkling":
+        return renderer.build_generation_prompt(messages, effort=EFFORT)
+    return renderer.build_generation_prompt(messages)
+
+
 async def run_agent_loop(
     initial_messages: list[Message],
     sample_turn: SampleTurn,
     execute_tool: ExecuteTool,
+    max_generated_tokens: int,
 ) -> dict[str, Any]:
     messages = list(initial_messages)
     events: list[dict[str, Any]] = []
@@ -120,9 +144,9 @@ async def run_agent_loop(
     termination_reason = "irrecoverable_model_error"
     error = None
 
-    while total_generated < MAX_GENERATED_TOKENS:
+    while total_generated < max_generated_tokens:
         model_turns += 1
-        remaining = MAX_GENERATED_TOKENS - total_generated
+        remaining = max_generated_tokens - total_generated
         try:
             sampled = await sample_turn(messages, remaining, model_turns)
         except Exception as exc:
@@ -149,8 +173,8 @@ async def run_agent_loop(
         })
         final_response = get_text_content(sampled.message)
 
-        if total_generated == MAX_GENERATED_TOKENS:
-            termination_reason = "generation_budget_32000"
+        if total_generated == max_generated_tokens:
+            termination_reason = f"generation_budget_{max_generated_tokens}"
             break
         if sampled.termination == "malformed":
             error = "model response was malformed before the generation budget was exhausted"
@@ -219,7 +243,7 @@ async def run_agent_loop(
     }
 
 
-def initial_messages(renderer: TmlV0Renderer, observation: str) -> list[Message]:
+def initial_messages(renderer: Any, observation: str) -> list[Message]:
     return renderer.create_conversation_prefix_with_tools(
         tools=[BROWSER_TOOL], system_prompt=SYSTEM_PROMPT
     ) + [
@@ -236,61 +260,100 @@ def initial_messages(renderer: TmlV0Renderer, observation: str) -> list[Message]
 
 async def validate_loop(output: Path) -> None:
     output.mkdir(parents=True, exist_ok=False)
-    renderer = TmlV0Renderer(get_tokenizer(MODEL))
     exact_tool_result = (
         '{"exit_code":0,"stdout":"ok\\n","error":null,"evidence_exit_code":0,'
         '"evidence_stdout":"","page_info":{"url":"http://127.0.0.1/task",'
         '"title":"Zenith"},"screenshot":"/tmp/outputs/turn.png"}'
     )
-    observed_remaining = []
+    model_results = []
+    for model, expected_renderer in SUPPORTED_MODEL_RENDERERS.items():
+        renderer_name, renderer = renderer_for_model(model)
+        assert renderer_name == expected_renderer
+        observed_remaining = []
+        executed = []
 
-    async def fake_sample(messages: list[Message], remaining: int, turn: int) -> SampledTurn:
-        renderer.build_generation_prompt(messages, effort=EFFORT)
-        observed_remaining.append(remaining)
-        if turn == 1:
-            message: Message = {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [ToolCall(
-                    id="validation-call-1",
-                    function=ToolCall.FunctionBody(
-                        name="browser_harness",
-                        arguments=json.dumps({"code": "print(page_info())"}),
-                    ),
-                )],
-            }
-            return SampledTurn(message, 8, "stop_sequence", {"turn": 1})
-        return SampledTurn(
-            Message(role="assistant", content='[{"title":"x","price":1,"seller":"y"}]'),
-            6,
-            "stop_sequence",
-            {"turn": 2},
+        async def fake_sample(
+            messages: list[Message], remaining: int, turn: int
+        ) -> SampledTurn:
+            build_generation_prompt(renderer, messages, model)
+            observed_remaining.append(remaining)
+            if turn == 1:
+                message: Message = {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [ToolCall(
+                        id="validation-call-1",
+                        function=ToolCall.FunctionBody(
+                            name="browser_harness",
+                            arguments=json.dumps({"code": "print(page_info())"}),
+                        ),
+                    )],
+                }
+                return SampledTurn(message, 8, "stop_sequence", {"turn": 1})
+            return SampledTurn(
+                Message(role="assistant", content='[{"title":"x","price":1,"seller":"y"}]'),
+                6,
+                "stop_sequence",
+                {"turn": 2},
+            )
+
+        async def fake_execute(code: str, turn: int, call: int) -> str:
+            executed.append({"code": code, "turn": turn, "call": call})
+            return exact_tool_result
+
+        result = await run_agent_loop(
+            initial_messages(
+                renderer,
+                '{"page_info":{"url":"http://127.0.0.1/task","title":"Zenith"}}',
+            ),
+            fake_sample,
+            fake_execute,
+            DEFAULT_MAX_GENERATED_TOKENS,
         )
+        assert result["termination_reason"] == "final_answer"
+        assert result["model_turns"] == 2
+        assert result["tool_calls"] == 1
+        assert result["total_generated_tokens"] == 14
+        assert observed_remaining == [32000, 31992]
+        assert executed == [{"code": "print(page_info())\n", "turn": 1, "call": 1}]
+        assert result["messages"][-2]["content"] == exact_tool_result
+        model_results.append({
+            "model": model,
+            "renderer": renderer_name,
+            "result": result,
+        })
 
-    executed = []
+    semaphore = asyncio.Semaphore(2)
+    active = 0
+    peak_active = 0
+    accounted = []
+    lock = asyncio.Lock()
 
-    async def fake_execute(code: str, turn: int, call: int) -> str:
-        executed.append({"code": code, "turn": turn, "call": call})
-        return exact_tool_result
+    async def fake_rollout(ordinal: int) -> None:
+        nonlocal active, peak_active
+        async with semaphore:
+            async with lock:
+                active += 1
+                peak_active = max(peak_active, active)
+            await asyncio.sleep(0)
+            accounted.append(ordinal)
+            async with lock:
+                active -= 1
 
-    result = await run_agent_loop(
-        initial_messages(renderer, '{"page_info":{"url":"http://127.0.0.1/task","title":"Zenith"}}'),
-        fake_sample,
-        fake_execute,
-    )
-    assert result["termination_reason"] == "final_answer"
-    assert result["model_turns"] == 2
-    assert result["tool_calls"] == 1
-    assert result["total_generated_tokens"] == 14
-    assert observed_remaining == [32000, 31992]
-    assert executed == [{"code": "print(page_info())\n", "turn": 1, "call": 1}]
-    assert result["messages"][-2]["content"] == exact_tool_result
-    assert result["messages"][2]["content"] == TASK_INSTRUCTION
+    await asyncio.gather(*(fake_rollout(ordinal) for ordinal in range(1, 5)))
+    assert sorted(accounted) == [1, 2, 3, 4]
+    assert peak_active == 2
     receipt = {
         "validated_at": utc_now(),
         "zero_provider_calls": True,
         "zero_sandboxes": True,
-        "result": result,
+        "model_renderer_results": model_results,
+        "concurrency_accounting": {
+            "requested": 4,
+            "accounted": len(accounted),
+            "concurrency": 2,
+            "peak_active": peak_active,
+        },
     }
     atomic_json(output / "validation.json", receipt)
     print(json.dumps(receipt, indent=2))
@@ -304,39 +367,26 @@ async def read_protocol_line(proc: asyncio.subprocess.Process) -> dict[str, Any]
     return json.loads(line)
 
 
-async def run_live(args: argparse.Namespace) -> None:
-    if not os.environ.get("TINKER_API_KEY", "").strip():
-        raise RuntimeError("TINKER_API_KEY is required")
-    if not os.environ.get("DAYTONA_KEY", "").strip():
-        raise RuntimeError("DAYTONA_KEY is required")
-    root = args.output.resolve()
-    root.mkdir(parents=True, exist_ok=False)
-    customer = args.customer_repo.resolve()
-    instruction = (customer / "tasks/zenith-zslr01/instruction.md").read_text().strip()
-    if instruction != TASK_INSTRUCTION:
-        raise RuntimeError("Zenith task instruction changed")
-    atomic_json(root / "contract.json", {
-        "started_at": utc_now(),
-        "model": MODEL,
-        "task": TASK,
-        "rollouts": 1,
-        "max_total_generated_tokens": MAX_GENERATED_TOKENS,
-        "system_prompt_sha256": digest(SYSTEM_PROMPT.encode()),
-        "browser_harness_skill_sha256": digest(BROWSER_HARNESS_SKILL.encode()),
-        "task_instruction": TASK_INSTRUCTION,
-        "browser_use_cloud": False,
-        "sampling_retries": 0,
-        "rollout_retries": 0,
-    })
-    execution = root / "execution"
+async def run_rollout(
+    args: argparse.Namespace,
+    root: Path,
+    ordinal: int,
+    sampling_seed: int,
+    client: Any,
+    renderer: Any,
+    renderer_name: str,
+) -> dict[str, Any]:
+    rollout_root = root / f"rollout-{ordinal:02d}"
+    rollout_root.mkdir()
+    execution = rollout_root / "execution"
     command = [
         sys.executable,
         str(Path(__file__).with_name("verify_zenith_daytona_sandbox.py")),
         "--world-binary", str(args.world_binary.resolve()),
-        "--customer-repo", str(customer),
+        "--customer-repo", str(args.customer_repo.resolve()),
         "--output", str(execution),
-        "--rollout-id", args.rollout_id,
-        "--seed", "411001",
+        "--rollout-id", f"r{ordinal:02d}",
+        "--seed", str(WORLD_SEED),
         "--interactive",
     ]
     env = os.environ.copy()
@@ -357,22 +407,19 @@ async def run_live(args: argparse.Namespace) -> None:
     ready = await read_protocol_line(proc)
     if ready.get("type") != "ready":
         raise RuntimeError(f"unexpected verifier handshake: {ready}")
-    atomic_json(root / "initial-grounding.json", ready)
+    atomic_json(rollout_root / "initial-grounding.json", ready)
 
-    renderer = TmlV0Renderer(get_tokenizer(MODEL))
-    tokenizer = get_tokenizer(MODEL)
-    service = tinker.ServiceClient(user_metadata={"recipe": "zenith_multi_turn_agent"})
-    client = await service.create_sampling_client_async(base_model=MODEL)
+    tokenizer = get_tokenizer(args.model)
 
     async def sample_turn(messages: list[Message], remaining: int, turn: int) -> SampledTurn:
-        prompt = renderer.build_generation_prompt(messages, effort=EFFORT)
+        prompt = build_generation_prompt(renderer, messages, args.model)
         response = await client.sample_async(
             prompt=prompt,
             num_samples=1,
             sampling_params=tinker.SamplingParams(
                 max_tokens=remaining,
                 temperature=1.0,
-                seed=SEED + turn - 1,
+                seed=sampling_seed + turn - 1,
                 stop=renderer.get_stop_sequences(),
             ),
         )
@@ -384,7 +431,7 @@ async def run_live(args: argparse.Namespace) -> None:
         record = {
             "turn": turn,
             "sampled_at": utc_now(),
-            "seed": SEED + turn - 1,
+            "seed": sampling_seed + turn - 1,
             "remaining_generation_budget_before": remaining,
             "prompt_tokens": prompt.length,
             "generated_tokens": len(tokens),
@@ -400,7 +447,7 @@ async def run_live(args: argparse.Namespace) -> None:
             "message": jsonable_message(message),
             "usage_or_cost_exposed": False,
         }
-        atomic_json(root / "generations" / f"turn-{turn:04d}.json", record)
+        atomic_json(rollout_root / "generations" / f"turn-{turn:04d}.json", record)
         return SampledTurn(message, len(tokens), termination_text, record)
 
     async def execute_tool(code: str, turn: int, call: int) -> str:
@@ -422,8 +469,9 @@ async def run_live(args: argparse.Namespace) -> None:
         initial_messages(renderer, str(ready["observation"])),
         sample_turn,
         execute_tool,
+        args.max_tokens,
     )
-    atomic_json(root / "trace.json", loop_result)
+    atomic_json(rollout_root / "trace.json", loop_result)
     usage = {
         "model_turns": loop_result["model_turns"],
         "tool_calls": loop_result["tool_calls"],
@@ -434,7 +482,7 @@ async def run_live(args: argparse.Namespace) -> None:
         "prompt_cache_hit_tokens_sum": sum(
             int(record["prompt_cache_hit_tokens"]) for record in loop_result["generations"]
         ),
-        "generation_cap": MAX_GENERATED_TOKENS,
+        "generation_cap": args.max_tokens,
         "usage_or_cost_exposed": False,
     }
     assert proc.stdin is not None
@@ -448,7 +496,7 @@ async def run_live(args: argparse.Namespace) -> None:
     proc.stdin.close()
     stderr = await proc.stderr.read() if proc.stderr is not None else b""
     return_code = await proc.wait()
-    (root / "verifier.stderr.txt").write_bytes(stderr)
+    (rollout_root / "verifier.stderr.txt").write_bytes(stderr)
     if return_code:
         raise RuntimeError(
             f"interactive verifier failed ({return_code}): {stderr.decode(errors='replace')[-4000:]}"
@@ -456,11 +504,14 @@ async def run_live(args: argparse.Namespace) -> None:
     result = json.loads((execution / "result.json").read_text())
     cleanup = json.loads((execution / "cleanup.json").read_text())
     summary = {
-        "artifact_root": str(root),
+        "ordinal": ordinal,
+        "artifact_root": str(rollout_root),
         "completed_at": utc_now(),
-        "model": MODEL,
+        "model": args.model,
+        "renderer": renderer_name,
+        "sampling_seed": sampling_seed,
+        "world_seed": WORLD_SEED,
         "task": TASK,
-        "rollouts": 1,
         "model_turns": loop_result["model_turns"],
         "tool_calls": loop_result["tool_calls"],
         "termination_reason": loop_result["termination_reason"],
@@ -473,31 +524,183 @@ async def run_live(args: argparse.Namespace) -> None:
         "cleanup": cleanup,
         "sandbox_id": result["sandbox_id"],
         "entry_url": result["world"]["entry_url"],
+        "cost": None,
+        "cost_returned": False,
         "browser_use_cloud": False,
     }
-    atomic_json(root / "summary.json", summary)
+    atomic_json(rollout_root / "summary.json", summary)
     hashes = []
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+    for path in sorted(item for item in rollout_root.rglob("*") if item.is_file()):
         if path.name == "artifact-hashes.json":
             continue
         payload = path.read_bytes()
         hashes.append({
+            "path": str(path.relative_to(rollout_root)),
+            "size": len(payload),
+            "sha256": digest(payload),
+        })
+    atomic_json(rollout_root / "artifact-hashes.json", hashes)
+    return summary
+
+
+async def run_live(args: argparse.Namespace) -> None:
+    if not os.environ.get("TINKER_API_KEY", "").strip():
+        raise RuntimeError("TINKER_API_KEY is required")
+    if not os.environ.get("DAYTONA_KEY", "").strip():
+        raise RuntimeError("DAYTONA_KEY is required")
+    root = args.output.resolve()
+    root.mkdir(parents=True, exist_ok=False)
+    customer = args.customer_repo.resolve()
+    instruction = (customer / "tasks/zenith-zslr01/instruction.md").read_text().strip()
+    if instruction != TASK_INSTRUCTION:
+        raise RuntimeError("Zenith task instruction changed")
+    renderer_name, renderer = renderer_for_model(args.model)
+    service = tinker.ServiceClient(user_metadata={"recipe": "zenith_multi_turn_agent"})
+    client = await service.create_sampling_client_async(base_model=args.model)
+    atomic_json(root / "contract.json", {
+        "started_at": utc_now(),
+        "model": args.model,
+        "renderer": renderer_name,
+        "task": TASK,
+        "rollouts": args.runs,
+        "concurrency": args.concurrency,
+        "max_total_generated_tokens_per_rollout": args.max_tokens,
+        "sampling_seeds": args.seeds,
+        "world_seed": WORLD_SEED,
+        "shared_snapshot": SHARED_SNAPSHOT,
+        "system_prompt_sha256": digest(SYSTEM_PROMPT.encode()),
+        "browser_harness_skill_sha256": digest(BROWSER_HARNESS_SKILL.encode()),
+        "task_instruction": TASK_INSTRUCTION,
+        "browser_use_cloud": False,
+        "sampling_retries": 0,
+        "rollout_retries": 0,
+    })
+
+    semaphore = asyncio.Semaphore(args.concurrency)
+    barrier = asyncio.Event()
+    state_lock = asyncio.Lock()
+    active = 0
+    peak_active = 0
+
+    async def accounted_rollout(ordinal: int, seed: int) -> dict[str, Any]:
+        nonlocal active, peak_active
+        await barrier.wait()
+        async with semaphore:
+            async with state_lock:
+                active += 1
+                peak_active = max(peak_active, active)
+            try:
+                return await run_rollout(
+                    args, root, ordinal, seed, client, renderer, renderer_name
+                )
+            except Exception as exc:
+                rollout_root = root / f"rollout-{ordinal:02d}"
+                cleanup_path = rollout_root / "execution" / "cleanup.json"
+                record = {
+                    "ordinal": ordinal,
+                    "artifact_root": str(rollout_root),
+                    "model": args.model,
+                    "renderer": renderer_name,
+                    "sampling_seed": seed,
+                    "world_seed": WORLD_SEED,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "cleanup": (
+                        json.loads(cleanup_path.read_text()) if cleanup_path.exists() else None
+                    ),
+                }
+                atomic_json(rollout_root / "summary.json", record)
+                return record
+            finally:
+                async with state_lock:
+                    active -= 1
+
+    tasks = [
+        asyncio.create_task(accounted_rollout(ordinal, seed))
+        for ordinal, seed in enumerate(args.seeds, start=1)
+    ]
+    released_at = utc_now()
+    atomic_json(root / "barrier.json", {
+        "released_at": released_at,
+        "runs": args.runs,
+        "concurrency": args.concurrency,
+    })
+    barrier.set()
+    rows = await asyncio.gather(*tasks)
+    rewards = [
+        float(row["deterministic_reward"])
+        for row in rows
+        if "deterministic_reward" in row
+    ]
+    passed = sum(int(bool(row.get("deterministic_passed"))) for row in rows)
+    cleaned = sum(
+        int(bool((row.get("cleanup") or {}).get("sandbox_deleted"))) for row in rows
+    )
+    summary = {
+        "artifact_root": str(root),
+        "completed_at": utc_now(),
+        "model": args.model,
+        "renderer": renderer_name,
+        "task": TASK,
+        "requested": args.runs,
+        "accounted": len(rows),
+        "completed": len(rewards),
+        "concurrency": args.concurrency,
+        "peak_active": peak_active,
+        "max_tokens_per_rollout": args.max_tokens,
+        "strict_passes": passed,
+        "strict_pass_rate": passed / args.runs,
+        "mean_deterministic_reward": sum(rewards) / args.runs,
+        "sandboxes_deleted": cleaned,
+        "snapshot_retained": True,
+        "shared_snapshot": SHARED_SNAPSHOT,
+        "browser_use_cloud": False,
+        "cost": None,
+        "cost_returned": False,
+        "rows": rows,
+    }
+    atomic_json(root / "summary.json", summary)
+    all_hashes = []
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        if path.name == "all-artifact-hashes.json":
+            continue
+        payload = path.read_bytes()
+        all_hashes.append({
             "path": str(path.relative_to(root)),
             "size": len(payload),
             "sha256": digest(payload),
         })
-    atomic_json(root / "artifact-hashes.json", hashes)
+    atomic_json(root / "all-artifact-hashes.json", all_hashes)
     print(json.dumps(summary, indent=2))
+    if len(rewards) != args.runs or cleaned != args.runs:
+        raise RuntimeError("one or more rollouts failed or did not clean up")
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model", choices=tuple(SUPPORTED_MODEL_RENDERERS), default=DEFAULT_MODEL
+    )
+    parser.add_argument("--runs", type=int, default=DEFAULT_RUNS)
+    parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_GENERATED_TOKENS)
+    parser.add_argument("--seeds", default=",".join(map(str, DEFAULT_SEEDS)))
     parser.add_argument("--world-binary", type=Path)
     parser.add_argument("--customer-repo", type=Path)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--rollout-id", default="fresh")
     parser.add_argument("--validate-loop", action="store_true")
     args = parser.parse_args()
+    try:
+        args.seeds = [int(value) for value in args.seeds.split(",") if value.strip()]
+    except ValueError:
+        parser.error("--seeds must be a comma-separated list of integers")
+    if args.runs <= 0:
+        parser.error("--runs must be positive")
+    if args.concurrency <= 0 or args.concurrency > args.runs:
+        parser.error("--concurrency must be between 1 and --runs")
+    if args.max_tokens <= 0:
+        parser.error("--max-tokens must be positive")
+    if len(args.seeds) != args.runs or len(set(args.seeds)) != args.runs:
+        parser.error("--seeds must contain exactly --runs unique integers")
     if args.validate_loop:
         await validate_loop(args.output.resolve())
         return
