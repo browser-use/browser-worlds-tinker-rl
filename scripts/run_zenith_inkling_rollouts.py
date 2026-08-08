@@ -19,10 +19,14 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 MODEL = "thinkingmachines/Inkling"
 ROLLOUTS = 4
 
-SYSTEM_PROMPT = """You are a browser agent. Use the browser_harness tool to complete the task.
-The tool executes synchronous Browser Harness Python in a local Chromium session. Make exactly
-one tool call containing the complete program, and have that program save the requested final
-answer. Do not answer from prior knowledge."""
+BROWSER_HARNESS_SKILL = (
+    Path(__file__).resolve().parents[1] / "skills/browser-harness/SKILL.md"
+).read_text()
+SYSTEM_PROMPT = (
+    "You are a browser agent. "
+    "Use the browser_harness tool to achieve your goal in the already-connected local Chromium browser.\n\n"
+    + BROWSER_HARNESS_SKILL
+)
 
 PROMPT = """You are controlling a local Chromium browser through Browser Harness Python.
 Complete this browser task independently: From the provided Zenith UK search-results page,
