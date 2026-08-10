@@ -6,8 +6,11 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 from daytona import (
@@ -19,10 +22,145 @@ from daytona import (
 
 SNAPSHOT = "browser-rl-local-harness-f5eaf904-c2m4d4-v1"
 LABEL = "browser-use.browser-rl-local-harness"
+PINNED_WORLD_BINARY_SHA256 = (
+    "41bae34a7b46e7415ef911a767bd637b0c73daed379a4ec5f57d20ffad9c786f"
+)
+SOURCE_SCOPE = "hosted_worlds/go_sites/zenith"
+TASK_PACKAGE = "harbor/tasks/zenith-zslr01"
+TASK_PACKAGE_VERSION = "1.0.0"
+INTERACTION_SKILLS_SOURCE_COMMIT = "f5eaf904b221dde0118eba1496961c3dc20fda88"
+INTERACTION_SKILLS_LOCAL_DIR = (
+    Path(__file__).resolve().parents[1] / "skills/browser-harness/interaction-skills"
+)
+INTERACTION_SKILLS_REMOTE_DIR = "/tmp/browser-harness-interaction-skills"
+INTERACTION_SKILL_SHA256 = {
+    "cookies.md": "cce3f46cf48b4662a05eee22c79278112ed12737277de42a1f6252e8ad9e09a8",
+    "cross-origin-iframes.md": "c8bb661316b137257a5f36c0febb7abbcfd84b8baa41bf6127578e8db73cfa06",
+    "dialogs.md": "b485e6978024dfbd8c0effd8e0635a4212ccb5732874f601ac525f17e0504d67",
+    "downloads.md": "cf69b75bfb9cf84a876504ccfef0e9a37b60b60efa5db0aa5acf81644999ee30",
+    "drag-and-drop.md": "eb2c567770ea51cdfa51ac9d00c8f7f070f211a978de8740c35a4f95c288c847",
+    "dropdowns.md": "9bf8cbab80425a91898a574eacebbabf83b9d28a7181d88eeecb6f98b430b5f5",
+    "iframes.md": "05d430364fc39f5778c8fd5d2da8ac1dae4ab69d0245126bc206a5d53cce30d5",
+    "network-requests.md": "a90e83dae83bcf3c9f74e483f1b5bb68e2e43eae5e9fb0bdae8b6ba05e282f4d",
+    "print-as-pdf.md": "73381a5e0e93d159aeab5afca4326e44eff622d2dd2a0a9d7a9e5d38e22d8429",
+    "screenshots.md": "d630a07c3a7338d0699f1a15216c9dff8a7c334432ac359a7316db5e347c6586",
+    "scrolling.md": "517ea4301c15d28655bc9ec2fd04ca3016d5201e2e1a91f5ecc2a88366eb34ce",
+    "shadow-dom.md": "6f9af297b220f27b82b91d75d7dd49a70c0f087de5da64a24acaadf574b60fe9",
+    "tabs.md": "58eff5821efc579be63c1248064e6b15ca530bb3d3424d4418618ce984fbcb6f",
+    "uploads.md": "c45219a4f08287ee76eb363574dee81bc3ca2209033184aa5e23e9fdd430f1f9",
+    "viewport.md": "4a824256c56d7fe4695a9ab82d5ca6cf58f692ee8a694c48367eb3dc52267dae",
+}
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def source_provenance(repo: Path, scope: str = SOURCE_SCOPE) -> dict[str, object]:
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tracked_diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--binary", "--no-ext-diff", "HEAD", "--", scope],
+        check=True,
+        capture_output=True,
+    ).stdout
+    untracked_raw = subprocess.run(
+        [
+            "git", "-C", str(repo), "ls-files", "--others", "--exclude-standard",
+            "-z", "--", scope,
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    untracked_names = sorted(
+        name.decode("utf-8", errors="surrogateescape")
+        for name in untracked_raw.split(b"\0")
+        if name
+    )
+    scoped_delta = bytearray(b"tracked-diff\0")
+    scoped_delta.extend(tracked_diff)
+    for name in untracked_names:
+        payload = (repo / name).read_bytes()
+        scoped_delta.extend(b"\0untracked\0")
+        scoped_delta.extend(name.encode("utf-8", errors="surrogateescape"))
+        scoped_delta.extend(b"\0")
+        scoped_delta.extend(str(len(payload)).encode())
+        scoped_delta.extend(b"\0")
+        scoped_delta.extend(payload)
+    dirty = bool(tracked_diff or untracked_names)
+    diff_hash = digest(bytes(scoped_delta)) if dirty else None
+    identity = head if not dirty else f"{head}+dirty.sha256.{diff_hash}"
+    return {
+        "head": head,
+        "scope": scope,
+        "dirty": dirty,
+        "scoped_diff_sha256": diff_hash,
+        "identity": identity,
+    }
+
+
+def canonical_harbor_package_digest(customer_repo: Path) -> str:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("uv is required to invoke the repository Harbor Packager")
+    task_dir = customer_repo / TASK_PACKAGE
+    code = (
+        "from pathlib import Path\n"
+        "from harbor.publisher.packager import Packager\n"
+        "value,_=Packager.compute_content_hash(Path(__import__('sys').argv[1]))\n"
+        "print(value)\n"
+    )
+    result = subprocess.run(
+        [
+            uv, "run", "--frozen", "--project", str(customer_repo), "python", "-c",
+            code, str(task_dir),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise RuntimeError(f"Harbor Packager returned an invalid digest: {value!r}")
+    return value
+
+
+def runtime_provenance(binary: Path, customer_repo: Path) -> dict[str, object]:
+    binary_bytes = binary.read_bytes()
+    binary_hash = digest(binary_bytes)
+    if binary_hash != PINNED_WORLD_BINARY_SHA256:
+        raise RuntimeError(
+            "binary SHA-256 mismatch: "
+            f"expected {PINNED_WORLD_BINARY_SHA256}, got {binary_hash}"
+        )
+    manifest = tomllib.loads(
+        (customer_repo / TASK_PACKAGE / "task.toml").read_text(encoding="utf-8")
+    )
+    version = str(manifest.get("task", {}).get("version", ""))
+    if version != TASK_PACKAGE_VERSION:
+        raise RuntimeError(
+            f"Zenith zslr01 package version mismatch: expected {TASK_PACKAGE_VERSION}, got {version}"
+        )
+    package_digest = canonical_harbor_package_digest(customer_repo)
+    return {
+        "source": source_provenance(customer_repo),
+        "task_package": {
+            "path": TASK_PACKAGE,
+            "version": version,
+            "digest": f"sha256:{package_digest}",
+            "digest_algorithm": "Harbor Packager.compute_content_hash",
+        },
+        "binary": {
+            "path": str(binary),
+            "size": len(binary_bytes),
+            "sha256": binary_hash,
+            "pinned": True,
+        },
+    }
 
 
 def ok(result, stage: str) -> str:
@@ -35,6 +173,61 @@ def ok(result, stage: str) -> str:
 def emit_protocol(value: dict) -> None:
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+
+def upload_interaction_skills(sandbox) -> dict[str, dict[str, int | str]]:
+    local_names = {
+        path.name for path in INTERACTION_SKILLS_LOCAL_DIR.iterdir() if path.is_file()
+    }
+    expected_names = set(INTERACTION_SKILL_SHA256)
+    if local_names != expected_names:
+        raise RuntimeError(
+            "interaction skill files do not match the pinned manifest: "
+            f"expected={sorted(expected_names)} actual={sorted(local_names)}"
+        )
+    payloads = {}
+    for name, expected_hash in INTERACTION_SKILL_SHA256.items():
+        payload = (INTERACTION_SKILLS_LOCAL_DIR / name).read_bytes()
+        actual_hash = digest(payload)
+        if actual_hash != expected_hash:
+            raise RuntimeError(
+                f"interaction skill source hash mismatch for {name}: {actual_hash}"
+            )
+        payloads[name] = payload
+
+    ok(sandbox.process.exec(
+        f"rm -rf {INTERACTION_SKILLS_REMOTE_DIR} && "
+        f"mkdir -p {INTERACTION_SKILLS_REMOTE_DIR}",
+        timeout=30,
+    ), "interaction skill directory")
+    for name, payload in payloads.items():
+        sandbox.fs.upload_file(
+            payload,
+            f"{INTERACTION_SKILLS_REMOTE_DIR}/{name}",
+            timeout=30,
+        )
+
+    readback = json.loads(ok(sandbox.process.exec(
+        "python3 - <<'PY'\n"
+        "import hashlib,json,pathlib\n"
+        f"root=pathlib.Path({INTERACTION_SKILLS_REMOTE_DIR!r})\n"
+        "files={}\n"
+        "for path in sorted(root.iterdir()):\n"
+        "    payload=path.read_bytes()\n"
+        "    files[path.name]={'size':len(payload),'sha256':hashlib.sha256(payload).hexdigest()}\n"
+        "print(json.dumps(files,sort_keys=True,separators=(',',':')))\n"
+        "PY",
+        timeout=30,
+    ), "interaction skill readback"))
+    expected_readback = {
+        name: {"size": len(payloads[name]), "sha256": source_hash}
+        for name, source_hash in INTERACTION_SKILL_SHA256.items()
+    }
+    if readback != expected_readback:
+        raise RuntimeError(
+            f"interaction skill sandbox readback mismatch: {readback}"
+        )
+    return readback
 
 
 def execute_harness_turn(sandbox, out: Path, label: str, code: str) -> str:
@@ -98,6 +291,7 @@ def run_interactive_episode(
     materialized: str,
     started: float,
 ) -> None:
+    upload_interaction_skills(sandbox)
     initial_observation = execute_harness_turn(
         sandbox,
         out,
@@ -220,11 +414,20 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=False)
     binary = (args.world_binary or customer / "snapshots/worlds/zenith/world-server").resolve()
     binary_bytes = binary.read_bytes()
-    runtime_identity = {"size": len(binary_bytes), "sha256": digest(binary_bytes)}
+    runtime_identity = runtime_provenance(binary, customer)
+    (out / "runtime-provenance.json").write_text(
+        json.dumps(runtime_identity, indent=2, sort_keys=True) + "\n"
+    )
+    source_identity = str(runtime_identity["source"]["identity"])
+    task_package_digest = str(runtime_identity["task_package"]["digest"])
     daytona = Daytona(DaytonaConfig(api_key=key, otel_enabled=False))
     sandbox = None
     started = time.monotonic()
-    cleanup = {"sandbox_deleted": False, "snapshot_retained": True}
+    cleanup = {
+        "sandbox_deleted": False,
+        "sandbox_absence_verified": False,
+        "snapshot_retained": True,
+    }
 
     try:
         try:
@@ -254,7 +457,7 @@ def main() -> None:
                     "BROWSER_USE_WORLDS_TASK_ID": "zslr01",
                     "BROWSER_USE_WORLDS_SEED": args.seed,
                     "BROWSER_USE_WORLDS_DIFFICULTY_CONFIGURATION": "standard",
-                    "BROWSER_USE_WORLDS_SOURCE_COMMIT": "a133fb8f1d79e03cc1330920dcfb1674fe9f45d2",
+                    "BROWSER_USE_WORLDS_SOURCE_COMMIT": source_identity,
                     "BROWSER_USE_WORLDS_HARBOR_COMMIT": "17bc7141ccb681e354e700fdf1dd90ee7c9856e3",
                     "BROWSER_USE_WORLDS_HARBOR_VERSION": "0.20.0",
                     "BROWSER_USE_WORLDS_INTERNAL_ORIGIN": "http://127.0.0.1:3000",
@@ -289,10 +492,10 @@ def main() -> None:
             "BROWSER_USE_WORLDS_TASK_ID": "zslr01",
             "BROWSER_USE_WORLDS_SEED": args.seed,
             "BROWSER_USE_WORLDS_DIFFICULTY_CONFIGURATION": "standard",
-            "BROWSER_USE_WORLDS_SOURCE_COMMIT": "a133fb8f1d79e03cc1330920dcfb1674fe9f45d2",
+            "BROWSER_USE_WORLDS_SOURCE_COMMIT": source_identity,
             "BROWSER_USE_WORLDS_IMAGE_DIGEST": f"sha256:{digest(binary_bytes)}",
-            "BROWSER_USE_WORLDS_TASK_PACKAGE_VERSION": "1.0.0",
-            "BROWSER_USE_WORLDS_TASK_PACKAGE_DIGEST": "sha256:2a1576ddbb4f6e49d2536d58c6b60c0b02d5710e5f33f54655f96e7414fc90ea",
+            "BROWSER_USE_WORLDS_TASK_PACKAGE_VERSION": TASK_PACKAGE_VERSION,
+            "BROWSER_USE_WORLDS_TASK_PACKAGE_DIGEST": task_package_digest,
             "BROWSER_USE_WORLDS_HARBOR_COMMIT": "17bc7141ccb681e354e700fdf1dd90ee7c9856e3",
             "BROWSER_USE_WORLDS_HARBOR_VERSION": "0.20.0",
             "HARBOR_TRIAL_ID": f"zenith-inkling-{args.rollout_id}",
@@ -333,6 +536,22 @@ def main() -> None:
         ))
         if runtime.get("site") != "zenith" or runtime.get("task_id") != "zslr01":
             raise RuntimeError(f"runtime identity mismatch: {runtime}")
+        expected_runtime_identity = {
+            "source_commit": source_identity,
+            "image_digest": f"sha256:{digest(binary_bytes)}",
+            "task_package_version": TASK_PACKAGE_VERSION,
+            "task_package_digest": task_package_digest,
+        }
+        mismatches = {
+            key: {"expected": expected, "actual": runtime.get(key)}
+            for key, expected in expected_runtime_identity.items()
+            if runtime.get(key) != expected
+        }
+        if mismatches:
+            raise RuntimeError(f"runtime provenance mismatch: {mismatches}")
+        (out / "runtime-receipt.json").write_text(
+            json.dumps(runtime, indent=2, sort_keys=True) + "\n"
+        )
         entry = f"http://127.0.0.1:3000/e/{runtime['episode_id']}/"
 
         ok(sandbox.process.exec(
@@ -482,6 +701,10 @@ print(answer)
                 cleanup["sandbox_deleted"] = True
             except DaytonaNotFoundError:
                 cleanup["sandbox_deleted"] = True
+            try:
+                daytona.get(str(sandbox.id))
+            except DaytonaNotFoundError:
+                cleanup["sandbox_absence_verified"] = True
         (out / "cleanup.json").write_text(json.dumps(cleanup, indent=2) + "\n")
 
 

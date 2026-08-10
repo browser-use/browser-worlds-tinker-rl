@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,11 +26,14 @@ SUPPORTED_MODEL_RENDERERS = {
     "Qwen/Qwen3.6-35B-A3B": "qwen3_5",
 }
 QWEN27_MODEL = "Qwen/Qwen3.6-27B"
+QWEN35_MODEL = "Qwen/Qwen3.6-35B-A3B"
 THINKING_CHOICES = ("model-default", "enabled", "disabled")
 TASK = "zenith-zslr01"
+TASK_INSTRUCTION_PATH = "harbor/tasks/zenith-zslr01/instruction.md"
 DEFAULT_RUNS = 1
 DEFAULT_CONCURRENCY = 1
 DEFAULT_MAX_GENERATED_TOKENS = 32000
+DEFAULT_TIMEOUT_SECONDS = 1200
 EFFORT = 0.7
 DEFAULT_SEEDS = [991001]
 WORLD_SEED = 411001
@@ -105,6 +109,20 @@ def clean_program(text: str) -> str:
     return value + "\n"
 
 
+def browser_harness_result_is_error(result_text: str) -> bool:
+    try:
+        result = json.loads(result_text)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(result, dict):
+        return False
+    return bool(
+        result.get("exit_code")
+        or result.get("evidence_exit_code")
+        or result.get("error")
+    )
+
+
 @dataclass
 class SampledTurn:
     message: Message
@@ -121,8 +139,10 @@ def renderer_for_model(model: str, thinking: str = "model-default") -> tuple[str
     renderer_name = SUPPORTED_MODEL_RENDERERS[model]
     if model == QWEN27_MODEL and thinking != "model-default":
         renderer_name = "qwen3_5" if thinking == "enabled" else "qwen3_5_disable_thinking"
+    elif model == QWEN35_MODEL and thinking == "enabled":
+        renderer_name = "qwen3_5"
     elif thinking != "model-default":
-        raise ValueError(f"--thinking {thinking} is only supported for {QWEN27_MODEL}")
+        raise ValueError(f"--thinking {thinking} is not supported for {model}")
     tokenizer = get_tokenizer(model)
     if renderer_name == "TmlV0Renderer":
         return renderer_name, TmlV0Renderer(tokenizer)
@@ -140,32 +160,49 @@ async def run_agent_loop(
     sample_turn: SampleTurn,
     execute_tool: ExecuteTool,
     max_generated_tokens: int,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     messages = list(initial_messages)
     events: list[dict[str, Any]] = []
     generations: list[dict[str, Any]] = []
     total_generated = 0
     model_turns = 0
+    attempted_tool_calls = 0
     tool_calls = 0
+    error_feedback_turns = 0
     final_response = ""
     termination_reason = "irrecoverable_model_error"
     error = None
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
 
     while total_generated < max_generated_tokens:
         model_turns += 1
         remaining = max_generated_tokens - total_generated
         try:
-            sampled = await sample_turn(messages, remaining, model_turns)
+            if deadline is None:
+                sampled = await sample_turn(messages, remaining, model_turns)
+            else:
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    termination_reason = f"rollout_timeout_{timeout_seconds}"
+                    break
+                sampled = await asyncio.wait_for(
+                    sample_turn(messages, remaining, model_turns),
+                    timeout=remaining_seconds,
+                )
+        except TimeoutError:
+            termination_reason = f"rollout_timeout_{timeout_seconds}"
+            break
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
-            termination_reason = "irrecoverable_model_error"
+            termination_reason = "irrecoverable_infrastructure_error"
             break
         if sampled.generated_tokens <= 0 or sampled.generated_tokens > remaining:
             error = (
                 f"invalid generated token count {sampled.generated_tokens} "
                 f"with {remaining} remaining"
             )
-            termination_reason = "irrecoverable_model_error"
+            termination_reason = "irrecoverable_infrastructure_error"
             break
         total_generated += sampled.generated_tokens
         messages.append(sampled.message)
@@ -183,43 +220,99 @@ async def run_agent_loop(
         if total_generated == max_generated_tokens:
             termination_reason = f"generation_budget_{max_generated_tokens}"
             break
-        if sampled.termination == "malformed":
-            error = "model response was malformed before the generation budget was exhausted"
-            termination_reason = "irrecoverable_model_error"
-            break
         unparsed = list(sampled.message.get("unparsed_tool_calls") or [])
         if unparsed:
-            error = "; ".join(value.error for value in unparsed)
-            termination_reason = "irrecoverable_model_error"
-            break
+            attempted_tool_calls += len(unparsed)
+            feedback = "; ".join(value.error for value in unparsed)
+            messages.append(Message(role="user", content=feedback))
+            error_feedback_turns += 1
+            events.append({
+                "type": "error_feedback",
+                "turn": model_turns,
+                "call": None,
+                "stage": "unparsed_tool_call",
+                "content": feedback,
+            })
+            continue
+        if sampled.termination == "malformed":
+            feedback = "model response was malformed before the generation budget was exhausted"
+            messages.append(Message(role="user", content=feedback))
+            error_feedback_turns += 1
+            events.append({
+                "type": "error_feedback",
+                "turn": model_turns,
+                "call": None,
+                "stage": "malformed_response",
+                "content": feedback,
+            })
+            continue
         calls = list(sampled.message.get("tool_calls") or [])
         if not calls:
             termination_reason = "final_answer" if final_response.strip() else "explicit_stop"
             break
 
-        call_failed = False
+        recoverable_error = False
         for call_index, call in enumerate(calls, start=1):
+            attempted_tool_calls += 1
             if call.function.name != "browser_harness":
-                error = f"unknown tool {call.function.name!r}"
-                termination_reason = "irrecoverable_model_error"
-                call_failed = True
+                feedback = f"unknown tool {call.function.name!r}"
+                messages.append(Message(
+                    role="tool",
+                    content=feedback,
+                    tool_call_id=call.id or "",
+                    name=call.function.name,
+                ))
+                error_feedback_turns += 1
+                events.append({
+                    "type": "error_feedback",
+                    "turn": model_turns,
+                    "call": call_index,
+                    "stage": "unknown_tool",
+                    "tool_call_id": call.id,
+                    "content": feedback,
+                })
+                recoverable_error = True
                 break
             try:
                 arguments = json.loads(call.function.arguments)
-                code = clean_program(str(arguments["code"]))
+                if (
+                    not isinstance(arguments, dict)
+                    or set(arguments) != {"code"}
+                    or not isinstance(arguments["code"], str)
+                ):
+                    raise ValueError(
+                        "arguments must be an object containing only a string 'code' field"
+                    )
+                code = clean_program(arguments["code"])
             except Exception as exc:
-                error = f"invalid browser_harness arguments: {type(exc).__name__}: {exc}"
-                termination_reason = "irrecoverable_model_error"
-                call_failed = True
+                feedback = (
+                    f"invalid browser_harness arguments: {type(exc).__name__}: {exc}"
+                )
+                messages.append(Message(
+                    role="tool",
+                    content=feedback,
+                    tool_call_id=call.id or "",
+                    name="browser_harness",
+                ))
+                error_feedback_turns += 1
+                events.append({
+                    "type": "error_feedback",
+                    "turn": model_turns,
+                    "call": call_index,
+                    "stage": "invalid_arguments",
+                    "tool_call_id": call.id,
+                    "content": feedback,
+                })
+                recoverable_error = True
                 break
             try:
                 result_text = await execute_tool(code, model_turns, call_index)
             except Exception as exc:
                 error = f"browser_harness protocol failed: {type(exc).__name__}: {exc}"
-                termination_reason = "irrecoverable_tool_error"
-                call_failed = True
+                termination_reason = "irrecoverable_infrastructure_error"
                 break
             tool_calls += 1
+            result_is_error = browser_harness_result_is_error(result_text)
             tool_message: Message = {
                 "role": "tool",
                 "content": result_text,
@@ -233,16 +326,25 @@ async def run_agent_loop(
                 "call": call_index,
                 "tool_call_id": call.id,
                 "content": result_text,
+                "is_error": result_is_error,
             })
-        if call_failed:
+            if result_is_error:
+                error_feedback_turns += 1
+                recoverable_error = True
+                break
+        if error is not None:
             break
+        if recoverable_error:
+            continue
 
     return {
         "termination_reason": termination_reason,
         "error": error,
         "final_response": final_response,
         "model_turns": model_turns,
+        "attempted_tool_calls": attempted_tool_calls,
         "tool_calls": tool_calls,
+        "error_feedback_turns": error_feedback_turns,
         "total_generated_tokens": total_generated,
         "messages": [jsonable_message(message) for message in messages],
         "events": events,
@@ -277,7 +379,7 @@ async def validate_loop(output: Path) -> None:
         ("thinkingmachines/Inkling", "model-default", "TmlV0Renderer"),
         (QWEN27_MODEL, "disabled", "qwen3_5_disable_thinking"),
         (QWEN27_MODEL, "enabled", "qwen3_5"),
-        ("Qwen/Qwen3.6-35B-A3B", "model-default", "qwen3_5"),
+        (QWEN35_MODEL, "enabled", "qwen3_5"),
     ]
     for model, thinking, expected_renderer in renderer_selections:
         renderer_name, renderer = renderer_for_model(model, thinking)
@@ -325,7 +427,9 @@ async def validate_loop(output: Path) -> None:
         )
         assert result["termination_reason"] == "final_answer"
         assert result["model_turns"] == 2
+        assert result["attempted_tool_calls"] == 1
         assert result["tool_calls"] == 1
+        assert result["error_feedback_turns"] == 0
         assert result["total_generated_tokens"] == 14
         assert observed_remaining == [32000, 31992]
         assert executed == [{"code": "print(page_info())\n", "turn": 1, "call": 1}]
@@ -519,11 +623,14 @@ async def run_rollout(
         sample_turn,
         execute_tool,
         args.max_tokens,
+        args.timeout,
     )
     atomic_json(rollout_root / "trace.json", loop_result)
     usage = {
         "model_turns": loop_result["model_turns"],
+        "attempted_tool_calls": loop_result["attempted_tool_calls"],
         "tool_calls": loop_result["tool_calls"],
+        "error_feedback_turns": loop_result["error_feedback_turns"],
         "generated_tokens": loop_result["total_generated_tokens"],
         "prompt_tokens_sum": sum(
             int(record["prompt_tokens"]) for record in loop_result["generations"]
@@ -540,6 +647,7 @@ async def run_rollout(
         "final_response": loop_result["final_response"],
         "termination_reason": loop_result["termination_reason"],
         "usage": usage,
+        "rollout_timeout_seconds": args.timeout,
     }, separators=(",", ":")) + "\n").encode())
     await proc.stdin.drain()
     proc.stdin.close()
@@ -563,7 +671,9 @@ async def run_rollout(
         "world_seed": WORLD_SEED,
         "task": TASK,
         "model_turns": loop_result["model_turns"],
+        "attempted_tool_calls": loop_result["attempted_tool_calls"],
         "tool_calls": loop_result["tool_calls"],
+        "error_feedback_turns": loop_result["error_feedback_turns"],
         "termination_reason": loop_result["termination_reason"],
         "error": loop_result["error"],
         "usage": usage,
@@ -601,7 +711,7 @@ async def run_live(args: argparse.Namespace) -> None:
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=False)
     customer = args.customer_repo.resolve()
-    instruction = (customer / "tasks/zenith-zslr01/instruction.md").read_text().strip()
+    instruction = (customer / TASK_INSTRUCTION_PATH).read_text().strip()
     if instruction != TASK_INSTRUCTION:
         raise RuntimeError("Zenith task instruction changed")
     renderer_name, renderer = renderer_for_model(args.model, args.thinking)
@@ -616,6 +726,7 @@ async def run_live(args: argparse.Namespace) -> None:
         "rollouts": args.runs,
         "concurrency": args.concurrency,
         "max_total_generated_tokens_per_rollout": args.max_tokens,
+        "rollout_timeout_seconds": args.timeout,
         "sampling_seeds": args.seeds,
         "world_seed": WORLD_SEED,
         "shared_snapshot": SHARED_SNAPSHOT,
@@ -700,6 +811,7 @@ async def run_live(args: argparse.Namespace) -> None:
         "concurrency": args.concurrency,
         "peak_active": peak_active,
         "max_tokens_per_rollout": args.max_tokens,
+        "rollout_timeout_seconds": args.timeout,
         "strict_passes": passed,
         "strict_pass_rate": passed / args.runs,
         "mean_deterministic_reward": sum(rewards) / args.runs,
@@ -737,6 +849,7 @@ async def main() -> None:
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_GENERATED_TOKENS)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--seeds", default=",".join(map(str, DEFAULT_SEEDS)))
     parser.add_argument("--world-binary", type=Path)
     parser.add_argument("--customer-repo", type=Path)
@@ -753,6 +866,8 @@ async def main() -> None:
         parser.error("--concurrency must be between 1 and --runs")
     if args.max_tokens <= 0:
         parser.error("--max-tokens must be positive")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
     if len(args.seeds) != args.runs or len(set(args.seeds)) != args.runs:
         parser.error("--seeds must contain exactly --runs unique integers")
     if args.validate_loop:
