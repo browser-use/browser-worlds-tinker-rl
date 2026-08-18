@@ -1,0 +1,24 @@
+{
+  "agent_loop_validation": "/Users/sarathmenon/Documents/startup/image_generation/browser-use-trial/browser-worlds-tinker-rl/artifacts/zenith-qwen35-iteration2-five-task-baseline-20260818/preflight-agent-loop/validation.json",
+  "canonical_world_seed": 411001,
+  "cells": 5,
+  "checkpoint_identity_sha256": "67a236224c01d402695eb2952e4505cde0bf0f1cd1d7639bc751721a576e24a4",
+  "package_digests": {
+    "zdib01": "sha256:e2c9bb208f207376e4c628f7a34a014602d7e34197dbc140363d9c6f1820b9eb",
+    "zeko01": "sha256:d2cdf3df9352ec0054597c81c86d8611b2e4aabce54f5663bbb7e1a17c566033",
+    "zflt01": "sha256:5a253b604517697bdda9dcc94c866e726fae389205e869a69cbd5ae1449709de",
+    "zpal01": "sha256:7d4708459f07c6356c4e4fcff8759d5a988de1897b333c96c290a74feeecc19e",
+    "zslr01": "sha256:1ff44fd51f90fbdde7a4f895e7e024d9d5aa3e872f3761259319b5de08b9d3a3"
+  },
+  "tasks": [
+    "zdib01",
+    "zeko01",
+    "zflt01",
+    "zpal01",
+    "zslr01"
+  ],
+  "validated_at": "2026-08-18T05:56:14.254925Z",
+  "world_sha256": "8846f49ee0ea08cfab34cab7c1717c69ba7e2eb1a3555e1dbf519718be9b7a03",
+  "zero_provider_calls": true,
+  "zero_sandboxes": true
+}
