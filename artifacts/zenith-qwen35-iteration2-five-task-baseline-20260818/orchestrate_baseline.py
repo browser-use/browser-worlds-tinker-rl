@@ -11,13 +11,14 @@ BROWSER = ROOT.parents[1]
 SFT = ROOT.parents[2] / "sft_skills"
 RL = SFT / "rl-environments"
 AGENT_SOURCE = BROWSER / "scripts/run_zenith_inkling_agent.py"
-WORLD = Path("/tmp/zenith-five-task-b7cbc663-linux-amd64")
+WORLD = Path("/tmp/zenith-five-task-c44fb35a-linux-amd64")
 MODEL = "Qwen/Qwen3.6-35B-A3B"
+SOURCE_HEAD = "c44fb35a1b43a82394aa97cdd9a1f6278a9a28ed"
 CHECKPOINT_ID = "67a236224c01d402695eb2952e4505cde0bf0f1cd1d7639bc751721a576e24a4"
 SAMPLER = "tinker://cfb3a410-2c6b-5ed5-b711-b17b81649d01:train:0/sampler_weights/zenith-qwen35-post-update-iteration-02-20260810-sampler"
 TASK_SEEDS = {task: (411001,) for task in ("zdib01", "zeko01", "zflt01", "zpal01", "zslr01")}
-PACKAGE_DIGESTS = {"zdib01":"sha256:e2c9bb208f207376e4c628f7a34a014602d7e34197dbc140363d9c6f1820b9eb","zeko01":"sha256:d2cdf3df9352ec0054597c81c86d8611b2e4aabce54f5663bbb7e1a17c566033","zflt01":"sha256:5a253b604517697bdda9dcc94c866e726fae389205e869a69cbd5ae1449709de","zpal01":"sha256:7d4708459f07c6356c4e4fcff8759d5a988de1897b333c96c290a74feeecc19e","zslr01":"sha256:1ff44fd51f90fbdde7a4f895e7e024d9d5aa3e872f3761259319b5de08b9d3a3"}
-WORLD_SHA = "8846f49ee0ea08cfab34cab7c1717c69ba7e2eb1a3555e1dbf519718be9b7a03"
+PACKAGE_DIGESTS = {"zdib01":"sha256:053c3e53ac5a81b0d049506b71b8e7689592fc72d40de75a67005475f4a69e14","zeko01":"sha256:4659d8a73216b4f24bbdf82723d0f54c94194fe80d54b2e765f61bed17d63f65","zflt01":"sha256:d88f566ac192ebb24fbfc3344a97f2a0e7293b9181cedd5dffeb8cba8511ea56","zpal01":"sha256:203fc3dddd8959f30821373db00f70adefe3983a5f678359277c9e11f14a7037","zslr01":"sha256:1c9d9c1befb87594254f4452666f11a3a56220d6ff3f80cad51f0d679d7bd9b9"}
+WORLD_SHA = "de18e946f49bf3fc9d141b595202bcf497d287e7feb6f06d8786eda94ebb2bb8"
 
 def now(): return datetime.now(UTC).isoformat().replace("+00:00","Z")
 def sha(data): return hashlib.sha256(data).hexdigest()
@@ -37,16 +38,16 @@ async def main():
         if not os.environ.get(key,"").strip(): raise RuntimeError(f"missing credential: {key}")
     if ROOT.joinpath("final-report.json").exists(): raise RuntimeError("final baseline already exists")
     source_head=git(RL,"rev-parse","HEAD")
-    assert source_head == git(RL,"rev-parse","origin/main")
+    assert source_head == SOURCE_HEAD == git(RL,"rev-parse","origin/main")
     scoped=["hosted_worlds/go_sites/zenith",*(f"harbor/tasks/zenith-{task}" for task in TASK_SEEDS)]
-    if subprocess.run(["git","-C",str(RL),"diff","--quiet","b7cbc663f116fb09462864b5927c1237da6927fe",source_head,"--",*scoped]).returncode:
-        raise RuntimeError("verified Zenith task or World inputs changed")
+    if git(RL,"status","--porcelain","--",*scoped):
+        raise RuntimeError("authoritative Zenith task or World inputs are dirty")
     assert sha(WORLD.read_bytes()) == WORLD_SHA
     modules={task:load_agent(task) for task in TASK_SEEDS}
-    contract={"started_at":now(),"effort":"medium","experiment":"iteration2_five_task_baseline","source_head":source_head,"source_head_equals_origin_main":True,"verified_scoped_inputs_equal_expected_head":"b7cbc663f116fb09462864b5927c1237da6927fe","browser_runner_head":git(BROWSER,"rev-parse","HEAD"),"world_binary":{"path":str(WORLD),"sha256":WORLD_SHA,"static_linux_amd64":True},"task_packages":{task:{"version":"1.0.0","digest":PACKAGE_DIGESTS[task],"canonical_seed":seeds[0],"rollout_count":1,"instruction":modules[task].TASK_INSTRUCTION,"instruction_sha256":sha(modules[task].TASK_INSTRUCTION.encode())} for task,seeds in TASK_SEEDS.items()},"checkpoint":{"identity_sha256":CHECKPOINT_ID,"sampler_path":SAMPLER,"base_model":MODEL,"frozen_baseline_predates_training_client":True},"thinking":"enabled","renderer":"qwen3_5","max_generated_tokens":32000,"timeout_seconds":1200,"concurrency":5,"maximum_infrastructure_replacements_per_task":2,"valid_outcome_retries":0,"snapshot":"browser-rl-local-harness-f5eaf904-c2m4d4-v1","browser_harness_skill_sha256":"4598708be6efa99df2bd1bf517b75c9652c9bca77372e2bfbdfa5359c8d9be3d","agent_source_sha256":"a6c20b8a4ee5285ce5dcb4aea872fd43cca895c47fc1eff1a007b5cc77b4eb26","verifier_source_sha256":"daef038ca0bf43f59f8196ae2c35abb8cb518e9d40dd0c3d6dc67c5a823b5db1","sole_numeric_reward":"canonical_internal_v2","deterministic_qc_scoring":False,"training_calls":0,"optimizer_steps":0,"browser_use_cloud":False}
+    contract={"started_at":now(),"effort":"medium","experiment":"iteration2_five_task_baseline","source_head":source_head,"source_head_equals_origin_main":True,"verified_scoped_inputs_equal_expected_head":SOURCE_HEAD,"verified_scoped_inputs_clean":True,"browser_runner_head":git(BROWSER,"rev-parse","HEAD"),"world_binary":{"path":str(WORLD),"sha256":WORLD_SHA,"static_linux_amd64":True},"task_packages":{task:{"version":"1.0.0","digest":PACKAGE_DIGESTS[task],"canonical_seed":seeds[0],"rollout_count":1,"instruction":modules[task].TASK_INSTRUCTION,"instruction_sha256":sha(modules[task].TASK_INSTRUCTION.encode())} for task,seeds in TASK_SEEDS.items()},"checkpoint":{"identity_sha256":CHECKPOINT_ID,"sampler_path":SAMPLER,"base_model":MODEL,"frozen_baseline_predates_training_client":True},"thinking":"enabled","renderer":"qwen3_5","max_generated_tokens":32000,"timeout_seconds":1200,"concurrency":5,"maximum_infrastructure_replacements_per_task":2,"valid_outcome_retries":0,"snapshot":"browser-rl-local-harness-f5eaf904-c2m4d4-v1","browser_harness_skill_sha256":"4598708be6efa99df2bd1bf517b75c9652c9bca77372e2bfbdfa5359c8d9be3d","agent_source_sha256":"a6c20b8a4ee5285ce5dcb4aea872fd43cca895c47fc1eff1a007b5cc77b4eb26","verifier_source_sha256":"daef038ca0bf43f59f8196ae2c35abb8cb518e9d40dd0c3d6dc67c5a823b5db1","sole_numeric_reward":"canonical_internal_v2","deterministic_qc_scoring":False,"training_calls":0,"optimizer_steps":0,"browser_use_cloud":False}
     write(ROOT/"predispatch-contract.json",contract)
     preflight_dir=ROOT/"preflight-agent-loop"; await modules["zslr01"].validate_loop(preflight_dir)
-    write(ROOT/"preflight.json",{"validated_at":now(),"zero_provider_calls":True,"zero_sandboxes":True,"tasks":list(TASK_SEEDS),"cells":5,"canonical_world_seed":411001,"world_sha256":WORLD_SHA,"checkpoint_identity_sha256":CHECKPOINT_ID,"package_digests":PACKAGE_DIGESTS,"agent_loop_validation":str(preflight_dir/"validation.json")})
+    write(ROOT/"preflight.json",{"validated_at":now(),"zero_provider_calls":True,"zero_sandboxes":True,"source_head":SOURCE_HEAD,"source_head_equals_origin_main":True,"verified_scoped_inputs_clean":True,"tasks":list(TASK_SEEDS),"cells":5,"canonical_world_seed":411001,"world_sha256":WORLD_SHA,"checkpoint_identity_sha256":CHECKPOINT_ID,"package_digests":PACKAGE_DIGESTS,"agent_loop_validation":str(preflight_dir/"validation.json")})
     service=tinker.ServiceClient(user_metadata={"recipe":"zenith_iteration2_five_task_baseline"}); client=await service.create_sampling_client_async(model_path=SAMPLER)
     semaphore=asyncio.Semaphore(5); state={"active":0,"peak":0}; lock=asyncio.Lock()
     async def run_one(task,ordinal,seed,attempt=1):

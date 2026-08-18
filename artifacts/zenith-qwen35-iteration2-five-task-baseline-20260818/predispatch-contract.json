@@ -19,12 +19,12 @@
   "renderer": "qwen3_5",
   "snapshot": "browser-rl-local-harness-f5eaf904-c2m4d4-v1",
   "sole_numeric_reward": "canonical_internal_v2",
-  "source_head": "6ac72650b765e1c5222da667fbcb9b6ffaa715e6",
+  "source_head": "c44fb35a1b43a82394aa97cdd9a1f6278a9a28ed",
   "source_head_equals_origin_main": true,
   "started_at": "2026-08-18T05:56:02.127039Z",
   "task_packages": {
     "zdib01": {
-      "digest": "sha256:e2c9bb208f207376e4c628f7a34a014602d7e34197dbc140363d9c6f1820b9eb",
+      "digest": "sha256:053c3e53ac5a81b0d049506b71b8e7689592fc72d40de75a67005475f4a69e14",
       "instruction": "Search Zenith for 'Omega-3 1000mg'. For EVERY product on the results page - including the top sponsored banner carousel, and reporting duplicate placements once per occurrence - return a JSON array where each element has exactly these fields: name, item_id (taken specifically from the data-zm-itemid DOM attribute), price (the exact numeric price in dollars), pack_count (number of capsules/softgels, not dosage), shipping_method, delivery_date (the primary delivery date shown, as YYYY-MM-DD; the absolute date is in the title attribute of the delivery span), highlights_count, rating, review_count (the exact ratings count, not the 'bought in past month' figure), zenfast (boolean, from the ZenFast icon element). Output raw JSON only: no markdown fences, no commentary.",
       "instruction_sha256": "185f290195f33660a1db3f2a398babacb611df6f43d4342742c75c92546022d2",
       "canonical_seed": 411001,
@@ -32,7 +32,7 @@
       "version": "1.0.0"
     },
     "zeko01": {
-      "digest": "sha256:d2cdf3df9352ec0054597c81c86d8611b2e4aabce54f5663bbb7e1a17c566033",
+      "digest": "sha256:4659d8a73216b4f24bbdf82723d0f54c94194fe80d54b2e765f61bed17d63f65",
       "instruction": "Search Zenith for 'Falqon running shoes'. Produce a table of the FIRST 15 ORGANIC Falqon-brand results, in page order, as a raw JSON array where each element has exactly these fields: item_id (the value of the data-zm-itemid attribute on the result card), image_url (the result-card image URL), title, description (the product's full description - descriptions are not shown on the results page), price (the exact numeric price in dollars; several results show 'See options' instead of a price on the card). Sponsored tiles and the sponsored brand banner must be excluded, including sponsored tiles for Falqon itself. Output raw JSON only: no markdown fences, no commentary.",
       "instruction_sha256": "59c0c6f01e66389b963fce69e7620e5364e3b862938cc6ccc95049bfe6bae5dc",
       "canonical_seed": 411001,
@@ -40,7 +40,7 @@
       "version": "1.0.0"
     },
     "zflt01": {
-      "digest": "sha256:5a253b604517697bdda9dcc94c866e726fae389205e869a69cbd5ae1449709de",
+      "digest": "sha256:d88f566ac192ebb24fbfc3344a97f2a0e7293b9181cedd5dffeb8cba8511ea56",
       "instruction": "On Zenith, find the 5 cheapest USB-C wall chargers rated 4.0 or higher with at least 500 reviews. The default sort is 'Featured' and is NOT price order; 'Price: Low to High' applies only via the sort dropdown (no URL parameter), and the rating/review filters must actually be applied. Return a raw JSON array of exactly 5 elements, each with exactly these fields: name, price (exact numeric price in dollars), rating, review_count (the exact ratings count, not the 'bought in past month' figure). Watch out: the applied-filter chip (e.g. 'Up to $25') is rendered inside the results column and is not a product price. Output raw JSON only: no markdown fences, no commentary.",
       "instruction_sha256": "71ac6c57c46af3355799cfd7be52a7397eb70c401350e07a036e31fe6bc56a97",
       "canonical_seed": 411001,
@@ -48,7 +48,7 @@
       "version": "1.0.0"
     },
     "zpal01": {
-      "digest": "sha256:7d4708459f07c6356c4e4fcff8759d5a988de1897b333c96c290a74feeecc19e",
+      "digest": "sha256:203fc3dddd8959f30821373db00f70adefe3983a5f678359277c9e11f14a7037",
       "instruction": "Open Zenith and search for 'plazzo' in Women's Fashion. Among the palazzo products, select the one with the highest rating. Open it and extract the complete list of customer reviews. Return a raw JSON array containing exactly one object with exactly these fields: item_id, title, price (numeric dollars), rating, review_count, reviews. Each review object must contain exactly author, rating, title, body. Output raw JSON only, with no markdown fences or commentary.",
       "instruction_sha256": "ef5fc9469a2163ba678b9d9220234972088cc1b2c9061555a4807598d702e9dd",
       "canonical_seed": 411001,
@@ -56,7 +56,7 @@
       "version": "1.0.0"
     },
     "zslr01": {
-      "digest": "sha256:1ff44fd51f90fbdde7a4f895e7e024d9d5aa3e872f3761259319b5de08b9d3a3",
+      "digest": "sha256:1c9d9c1befb87594254f4452666f11a3a56220d6ff3f80cad51f0d679d7bd9b9",
       "instruction": "From this Zenith UK search results page, extract a list of smart lighting products, including the product title, price, and the name of the seller.",
       "instruction_sha256": "3214dfdac38243fcd8241cf0861aa2890c7d827677fe994f1a26acb950fea03b",
       "canonical_seed": 411001,
@@ -68,11 +68,12 @@
   "timeout_seconds": 1200,
   "training_calls": 0,
   "valid_outcome_retries": 0,
-  "verified_scoped_inputs_equal_expected_head": "b7cbc663f116fb09462864b5927c1237da6927fe",
+  "verified_scoped_inputs_clean": true,
+  "verified_scoped_inputs_equal_expected_head": "c44fb35a1b43a82394aa97cdd9a1f6278a9a28ed",
   "verifier_source_sha256": "daef038ca0bf43f59f8196ae2c35abb8cb518e9d40dd0c3d6dc67c5a823b5db1",
   "world_binary": {
-    "path": "/tmp/zenith-five-task-b7cbc663-linux-amd64",
-    "sha256": "8846f49ee0ea08cfab34cab7c1717c69ba7e2eb1a3555e1dbf519718be9b7a03",
+    "path": "/tmp/zenith-five-task-c44fb35a-linux-amd64",
+    "sha256": "de18e946f49bf3fc9d141b595202bcf497d287e7feb6f06d8786eda94ebb2bb8",
     "static_linux_amd64": true
   }
 }

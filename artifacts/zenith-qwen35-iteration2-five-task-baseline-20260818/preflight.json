@@ -4,12 +4,14 @@
   "cells": 5,
   "checkpoint_identity_sha256": "67a236224c01d402695eb2952e4505cde0bf0f1cd1d7639bc751721a576e24a4",
   "package_digests": {
-    "zdib01": "sha256:e2c9bb208f207376e4c628f7a34a014602d7e34197dbc140363d9c6f1820b9eb",
-    "zeko01": "sha256:d2cdf3df9352ec0054597c81c86d8611b2e4aabce54f5663bbb7e1a17c566033",
-    "zflt01": "sha256:5a253b604517697bdda9dcc94c866e726fae389205e869a69cbd5ae1449709de",
-    "zpal01": "sha256:7d4708459f07c6356c4e4fcff8759d5a988de1897b333c96c290a74feeecc19e",
-    "zslr01": "sha256:1ff44fd51f90fbdde7a4f895e7e024d9d5aa3e872f3761259319b5de08b9d3a3"
+    "zdib01": "sha256:053c3e53ac5a81b0d049506b71b8e7689592fc72d40de75a67005475f4a69e14",
+    "zeko01": "sha256:4659d8a73216b4f24bbdf82723d0f54c94194fe80d54b2e765f61bed17d63f65",
+    "zflt01": "sha256:d88f566ac192ebb24fbfc3344a97f2a0e7293b9181cedd5dffeb8cba8511ea56",
+    "zpal01": "sha256:203fc3dddd8959f30821373db00f70adefe3983a5f678359277c9e11f14a7037",
+    "zslr01": "sha256:1c9d9c1befb87594254f4452666f11a3a56220d6ff3f80cad51f0d679d7bd9b9"
   },
+  "source_head": "c44fb35a1b43a82394aa97cdd9a1f6278a9a28ed",
+  "source_head_equals_origin_main": true,
   "tasks": [
     "zdib01",
     "zeko01",
@@ -17,8 +19,9 @@
     "zpal01",
     "zslr01"
   ],
-  "validated_at": "2026-08-18T05:56:14.254925Z",
-  "world_sha256": "8846f49ee0ea08cfab34cab7c1717c69ba7e2eb1a3555e1dbf519718be9b7a03",
+  "validated_at": "2026-08-18T12:45:30Z",
+  "verified_scoped_inputs_clean": true,
+  "world_sha256": "de18e946f49bf3fc9d141b595202bcf497d287e7feb6f06d8786eda94ebb2bb8",
   "zero_provider_calls": true,
   "zero_sandboxes": true
 }
