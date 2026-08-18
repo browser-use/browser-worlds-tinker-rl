@@ -14,6 +14,9 @@ from browser_use import ChatGoogle
 from internal_v2_judge import InternalV2Judge, InternalV2JudgementResult, RubricState
 
 TASKS = ("zdib01", "zeko01", "zflt01", "zpal01", "zslr01")
+PRESERVED_ROLLOUTS = {
+    "zflt01": HERE / "invalid-attempts/zflt01/rollout-01-attempt-02",
+}
 RUBRICS = {
     "zdib01": (RL / "docs-site/data/rubrics/zdib01.md", "a5f9d2bce6bf91916ad955425f384011a0b6965a3a482e39789f5f5f3a1d69a7"),
     "zeko01": (RL / "docs-site/data/rubrics/zeko01.md", "ef4d175b49b8726c2cea4298d287fe93d8bb7ddd3873d4c47f9f6878c05eeaf5"),
@@ -69,7 +72,8 @@ async def main():
     semaphore = asyncio.Semaphore(5)
     async def one(task, ordinal):
         async with semaphore:
-            rollout = args.root / "tasks" / task / f"rollout-{ordinal:02d}"
+            current = args.root / "tasks" / task / f"rollout-{ordinal:02d}"
+            rollout = PRESERVED_ROLLOUTS.get(task, current)
             summary = json.loads((rollout / "summary.json").read_text())
             trace, steps, images, image_steps, outputs = projection(rollout)
             instruction = (RL / f"harbor/tasks/zenith-{task}/instruction.md").read_text().strip()
@@ -87,7 +91,7 @@ async def main():
             judgement = evaluation.judgement; reward = float(InternalV2Judge.score({}, result, judgement))
             receipt = {"judged_at":now(), "single_call":True, "task":task, "ordinal":ordinal, "seed":summary["sampling_seed"], "reward":reward, "strict_pass":bool(judgement.verdict), "raw_judgement":judgement.model_dump(mode="json"), "judge_model":"gemini-3-flash-preview", "judge_repo_head":JUDGE_REPO_HEAD, "judge_source_sha256":JUDGE_SOURCE_SHA, "judge_prompt_sha256":JUDGE_PROMPT_SHA, "rubric_path":str(rubric_path), "rubric_sha256":rubric_sha, "instruction_sha256":sha(instruction.encode()), "trace_sha256":sha((rollout/"trace.json").read_bytes()), "final_response_sha256":sha(trace["final_response"].encode()), "screenshots":[{"path":str(p.relative_to(rollout)),"step":s,"sha256":sha(p.read_bytes())} for p,s in zip(images,image_steps)], "output_files":outputs, **meta}
             write(rollout / "internal-v2/receipt.json", receipt)
-            return {"task":task,"ordinal":ordinal,"seed":summary["sampling_seed"],"reward":reward,"strict_pass":bool(judgement.verdict),"failure_category":judgement.failure_category}
+            return {"task":task,"ordinal":ordinal,"seed":summary["sampling_seed"],"reward":reward,"strict_pass":bool(judgement.verdict),"failure_category":judgement.failure_category,"rollout_path":str(rollout)}
     rows = await asyncio.gather(*(one(task, 1) for task in TASKS))
     write(args.root / "internal-v2-batch-receipt.json", {"judged_at":now(),"calls":len(rows),"one_call_per_valid_trace":True,"rows":rows,"judge_repo_head":JUDGE_REPO_HEAD})
     print(json.dumps(rows))

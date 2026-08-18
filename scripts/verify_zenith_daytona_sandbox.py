@@ -26,8 +26,8 @@ PINNED_WORLD_BINARY_SHA256 = (
     "41bae34a7b46e7415ef911a767bd637b0c73daed379a4ec5f57d20ffad9c786f"
 )
 SOURCE_SCOPE = "hosted_worlds/go_sites/zenith"
-TASK_PACKAGE = "harbor/tasks/zenith-zslr01"
 TASK_PACKAGE_VERSION = "1.0.0"
+TASK_IDS = ("zdib01", "zeko01", "zflt01", "zpal01", "zslr01")
 INTERACTION_SKILLS_SOURCE_COMMIT = "f5eaf904b221dde0118eba1496961c3dc20fda88"
 INTERACTION_SKILLS_LOCAL_DIR = (
     Path(__file__).resolve().parents[1] / "skills/browser-harness/interaction-skills"
@@ -103,11 +103,11 @@ def source_provenance(repo: Path, scope: str = SOURCE_SCOPE) -> dict[str, object
     }
 
 
-def canonical_harbor_package_digest(customer_repo: Path) -> str:
+def canonical_harbor_package_digest(customer_repo: Path, task_package: str) -> str:
     uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("uv is required to invoke the repository Harbor Packager")
-    task_dir = customer_repo / TASK_PACKAGE
+    task_dir = customer_repo / task_package
     code = (
         "from pathlib import Path\n"
         "from harbor.publisher.packager import Packager\n"
@@ -129,27 +129,33 @@ def canonical_harbor_package_digest(customer_repo: Path) -> str:
     return value
 
 
-def runtime_provenance(binary: Path, customer_repo: Path) -> dict[str, object]:
+def runtime_provenance(
+    binary: Path,
+    customer_repo: Path,
+    task_id: str,
+    expected_binary_sha256: str,
+) -> dict[str, object]:
     binary_bytes = binary.read_bytes()
     binary_hash = digest(binary_bytes)
-    if binary_hash != PINNED_WORLD_BINARY_SHA256:
+    if binary_hash != expected_binary_sha256:
         raise RuntimeError(
             "binary SHA-256 mismatch: "
-            f"expected {PINNED_WORLD_BINARY_SHA256}, got {binary_hash}"
+            f"expected {expected_binary_sha256}, got {binary_hash}"
         )
+    task_package = f"harbor/tasks/zenith-{task_id}"
     manifest = tomllib.loads(
-        (customer_repo / TASK_PACKAGE / "task.toml").read_text(encoding="utf-8")
+        (customer_repo / task_package / "task.toml").read_text(encoding="utf-8")
     )
     version = str(manifest.get("task", {}).get("version", ""))
     if version != TASK_PACKAGE_VERSION:
         raise RuntimeError(
-            f"Zenith zslr01 package version mismatch: expected {TASK_PACKAGE_VERSION}, got {version}"
+            f"Zenith {task_id} package version mismatch: expected {TASK_PACKAGE_VERSION}, got {version}"
         )
-    package_digest = canonical_harbor_package_digest(customer_repo)
+    package_digest = canonical_harbor_package_digest(customer_repo, task_package)
     return {
         "source": source_provenance(customer_repo),
         "task_package": {
-            "path": TASK_PACKAGE,
+            "path": task_package,
             "version": version,
             "digest": f"sha256:{package_digest}",
             "digest_algorithm": "Harbor Packager.compute_content_hash",
@@ -290,6 +296,7 @@ def run_interactive_episode(
     runtime_identity: dict,
     materialized: str,
     started: float,
+    task_id: str,
 ) -> None:
     upload_interaction_skills(sandbox)
     initial_observation = execute_harness_turn(
@@ -374,7 +381,7 @@ def run_interactive_episode(
         "sandbox_id": str(sandbox.id),
         "world": {
             "site": "zenith",
-            "task_id": "zslr01",
+            "task_id": task_id,
             "episode_id": runtime["episode_id"],
             "entry_url": entry,
         },
@@ -396,10 +403,12 @@ def run_interactive_episode(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--world-binary", type=Path)
+    parser.add_argument("--world-sha256", default=PINNED_WORLD_BINARY_SHA256)
     parser.add_argument("--customer-repo", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--program", type=Path)
     parser.add_argument("--rollout-id", default="smoke")
+    parser.add_argument("--task-id", choices=TASK_IDS, required=True)
     parser.add_argument("--seed", default="411001")
     parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
@@ -414,7 +423,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=False)
     binary = (args.world_binary or customer / "snapshots/worlds/zenith/world-server").resolve()
     binary_bytes = binary.read_bytes()
-    runtime_identity = runtime_provenance(binary, customer)
+    runtime_identity = runtime_provenance(
+        binary, customer, args.task_id, args.world_sha256
+    )
     (out / "runtime-provenance.json").write_text(
         json.dumps(runtime_identity, indent=2, sort_keys=True) + "\n"
     )
@@ -447,14 +458,14 @@ def main() -> None:
                 snapshot=SNAPSHOT,
                 language="python",
                 name=f"zenith-inkling-{args.rollout_id}",
-                labels={LABEL: f"zenith-zslr01-{args.rollout_id}"},
+                labels={LABEL: f"zenith-{args.rollout_id}"},
                 public=False,
                 ephemeral=True,
                 auto_stop_interval=30,
                 network_block_all=False,
                 env_vars={
                     "BROWSER_USE_WORLDS_SITE": "zenith",
-                    "BROWSER_USE_WORLDS_TASK_ID": "zslr01",
+                    "BROWSER_USE_WORLDS_TASK_ID": args.task_id,
                     "BROWSER_USE_WORLDS_SEED": args.seed,
                     "BROWSER_USE_WORLDS_DIFFICULTY_CONFIGURATION": "standard",
                     "BROWSER_USE_WORLDS_SOURCE_COMMIT": source_identity,
@@ -489,7 +500,7 @@ def main() -> None:
         common_env = {
             "CONTROL_TOKEN": "browser-rl-local-harness-control",
             "BROWSER_USE_WORLDS_SITE": "zenith",
-            "BROWSER_USE_WORLDS_TASK_ID": "zslr01",
+            "BROWSER_USE_WORLDS_TASK_ID": args.task_id,
             "BROWSER_USE_WORLDS_SEED": args.seed,
             "BROWSER_USE_WORLDS_DIFFICULTY_CONFIGURATION": "standard",
             "BROWSER_USE_WORLDS_SOURCE_COMMIT": source_identity,
@@ -534,7 +545,7 @@ def main() -> None:
             sandbox.process.exec("cat /tmp/customer-world/run/runtime.json", timeout=30),
             "runtime receipt",
         ))
-        if runtime.get("site") != "zenith" or runtime.get("task_id") != "zslr01":
+        if runtime.get("site") != "zenith" or runtime.get("task_id") != args.task_id:
             raise RuntimeError(f"runtime identity mismatch: {runtime}")
         expected_runtime_identity = {
             "source_commit": source_identity,
@@ -573,6 +584,7 @@ def main() -> None:
                 runtime_identity,
                 materialized,
                 started,
+                args.task_id,
             )
             return
 
@@ -669,7 +681,7 @@ print(answer)
             "architecture": "one_daytona_sandbox",
             "browser_use_cloud": False,
             "sandbox_id": str(sandbox.id),
-            "world": {"site": "zenith", "task_id": "zslr01", "episode_id": runtime["episode_id"], "entry_url": entry},
+            "world": {"site": "zenith", "task_id": args.task_id, "episode_id": runtime["episode_id"], "entry_url": entry},
             "runtime_artifact": runtime_identity,
             "materialization": materialized,
             "browser_harness_stdout": harness_stdout[-8000:],

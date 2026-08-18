@@ -155,6 +155,15 @@ def build_generation_prompt(renderer: Any, messages: list[Message], model: str):
     return renderer.build_generation_prompt(messages)
 
 
+def is_model_context_limit_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        ("context window" in message or "context limit" in message)
+        and "prompt" in message
+        and ("max_tokens" in message or "max tokens" in message)
+    )
+
+
 async def run_agent_loop(
     initial_messages: list[Message],
     sample_turn: SampleTurn,
@@ -195,7 +204,11 @@ async def run_agent_loop(
             break
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
-            termination_reason = "irrecoverable_infrastructure_error"
+            termination_reason = (
+                "model_context_limit"
+                if is_model_context_limit_error(exc)
+                else "irrecoverable_infrastructure_error"
+            )
             break
         if sampled.generated_tokens <= 0 or sampled.generated_tokens > remaining:
             error = (
@@ -527,17 +540,22 @@ async def run_rollout(
     client: Any,
     renderer: Any,
     renderer_name: str,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     rollout_root = root / f"rollout-{ordinal:02d}"
     rollout_root.mkdir()
     execution = rollout_root / "execution"
+    task_id = TASK.removeprefix("zenith-")
+    rollout_id = f"{task_id}-r{ordinal:02d}-a{attempt:02d}"
     command = [
         sys.executable,
         str(Path(__file__).with_name("verify_zenith_daytona_sandbox.py")),
         "--world-binary", str(args.world_binary.resolve()),
+        "--world-sha256", digest(args.world_binary.read_bytes()),
         "--customer-repo", str(args.customer_repo.resolve()),
         "--output", str(execution),
-        "--rollout-id", f"r{ordinal:02d}",
+        "--rollout-id", rollout_id,
+        "--task-id", task_id,
         "--seed", str(WORLD_SEED),
         "--interactive",
     ]
@@ -662,6 +680,8 @@ async def run_rollout(
     cleanup = json.loads((execution / "cleanup.json").read_text())
     summary = {
         "ordinal": ordinal,
+        "attempt": attempt,
+        "rollout_id": rollout_id,
         "artifact_root": str(rollout_root),
         "completed_at": utc_now(),
         "model": args.model,
